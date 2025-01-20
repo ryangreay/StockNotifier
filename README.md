@@ -3,7 +3,7 @@
 An ML-driven application that predicts significant stock price movements and sends push notifications.
 
 ## Features
-- Machine Learning model (Random Forest) trained on historical stock data
-- Real-time stock data monitoring
-- Push notifications for predicted significant movements via Pushbullet
-- Cloud-ready FastAPI service
+- Machine Learning model (Random Forest Classifier) trained on historical stock data
+- Real-time stock data monitoring checks for price movement over the next 24 hours
+- Push notifications for predicted significant movements via Telegram
+- Model training and predictions available via FastAPI
