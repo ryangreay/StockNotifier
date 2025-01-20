@@ -11,8 +11,12 @@ API_KEY = os.getenv('API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
+# GCS Configuration
+GCS_BUCKET_NAME = os.getenv('GCS_BUCKET_NAME')
+GCS_MODEL_PATH = 'models/stock_predictor.joblib'
+LOCAL_MODEL_PATH = '/tmp/stock_predictor.joblib'  # Temporary local storage
+
 # Model Configuration
-MODEL_PATH = 'models/stock_predictor.joblib'
 FEATURE_COLUMNS = [
     'Open', 'High', 'Low', 'Close', 'Volume',
     'MA_5', 'MA_20', 'RSI', 'MACD', 'MACD_Signal',

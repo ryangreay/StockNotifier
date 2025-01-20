@@ -2,6 +2,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import time
 from .config import HISTORICAL_DAYS, FEATURE_COLUMNS
 
 def calculate_technical_indicators(df):
@@ -36,6 +37,25 @@ def create_target_variable(df, threshold):
     df['target'] = (future_returns.abs() > threshold).astype(int)
     return df
 
+def fetch_data_with_retry(symbol, start_date, end_date, max_retries=3, retry_delay=5):
+    """Fetch data with retry logic."""
+    for attempt in range(max_retries):
+        try:
+            stock = yf.Ticker(symbol)
+            df = stock.history(start=start_date, end=end_date, interval='1h')
+            
+            if not df.empty:
+                return df
+            
+            print(f"Attempt {attempt + 1}: Empty data received for {symbol}, retrying...")
+        except Exception as e:
+            print(f"Attempt {attempt + 1}: Error fetching data for {symbol}: {str(e)}")
+        
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
+    
+    raise ValueError(f"Failed to fetch data for {symbol} after {max_retries} attempts")
+
 def get_historical_data(symbol, days=None):
     """Fetch historical data for a given symbol."""
     days = days or HISTORICAL_DAYS
@@ -43,11 +63,12 @@ def get_historical_data(symbol, days=None):
     start_date = end_date - timedelta(days=days)
     
     try:
-        stock = yf.Ticker(symbol)
-        df = stock.history(start=start_date, end=end_date, interval='1h')
+        # Try to fetch data with retries
+        df = fetch_data_with_retry(symbol, start_date, end_date)
         
-        if df.empty:
-            raise ValueError(f"No data found for symbol {symbol}")
+        # Verify we have enough data
+        if len(df) < 24:  # Need at least 24 hours of data
+            raise ValueError(f"Insufficient data points for {symbol}: got {len(df)}, need at least 24")
         
         df = calculate_technical_indicators(df)
         df = create_target_variable(df, threshold=0.02)
@@ -55,10 +76,13 @@ def get_historical_data(symbol, days=None):
         # Drop rows with NaN values
         df = df.dropna()
         
+        if df.empty:
+            raise ValueError(f"No valid data points after processing for {symbol}")
+        
         return df
     
     except Exception as e:
-        raise Exception(f"Error fetching data for {symbol}: {str(e)}")
+        raise Exception(f"Error processing data for {symbol}: {str(e)}")
 
 def prepare_features(df):
     """Prepare features for model training/prediction."""
@@ -66,5 +90,14 @@ def prepare_features(df):
 
 def get_latest_data(symbol):
     """Get the most recent data for prediction."""
-    df = get_historical_data(symbol, days=5)  # Get last 5 days of hourly data
-    return df.iloc[-1:] if not df.empty else None 
+    try:
+        # Try to get more data than needed to ensure we have enough after processing
+        df = get_historical_data(symbol, days=7)  # Get last 7 days of hourly data
+        if df is None or df.empty:
+            raise ValueError(f"No data available for {symbol}")
+            
+        # Return the most recent complete data point
+        return df.iloc[-1:] if not df.empty else None
+    except Exception as e:
+        print(f"Error in get_latest_data for {symbol}: {str(e)}")
+        raise 

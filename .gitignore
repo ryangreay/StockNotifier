@@ -4,3 +4,9 @@ Dockerfile
 venv
 venv/*
 models/stock_predictor.joblib
+stocknotifier-448414-ed3bb01223fb.json
+Dockerfile.api
+Dockerfile.scheduler
+fly.scheduler.toml
+fly.toml
+service-account-key.json
