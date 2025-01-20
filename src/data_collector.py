@@ -3,7 +3,28 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import time
-from .config import HISTORICAL_DAYS, FEATURE_COLUMNS
+from src.config import (
+    HISTORICAL_DAYS,
+    FEATURE_COLUMNS,
+    SIGNIFICANT_MOVEMENT_THRESHOLD,
+    PREDICTION_WINDOW
+)
+
+def get_real_time_price(symbol):
+    """Get real-time price data for a symbol."""
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.get_info()
+        return {
+            'currentPrice': info.get('regularMarketPrice', None),
+            'open': info.get('regularMarketOpen', None),
+            'high': info.get('regularMarketDayHigh', None),
+            'low': info.get('regularMarketDayLow', None),
+            'volume': info.get('regularMarketVolume', None)
+        }
+    except Exception as e:
+        print(f"Error getting real-time price for {symbol}: {str(e)}")
+        return None
 
 def calculate_technical_indicators(df):
     """Calculate technical indicators for the dataset."""
@@ -31,10 +52,11 @@ def calculate_technical_indicators(df):
     
     return df
 
-def create_target_variable(df, threshold):
+def create_target_variable(df):
     """Create target variable based on future price movements."""
-    future_returns = df['Close'].pct_change(periods=24).shift(-24)  # 24-hour future returns
-    df['target'] = (future_returns.abs() > threshold).astype(int)
+    # Use PREDICTION_WINDOW for the look-ahead period
+    future_returns = df['Close'].pct_change(periods=PREDICTION_WINDOW).shift(-PREDICTION_WINDOW)
+    df['target'] = (future_returns.abs() > SIGNIFICANT_MOVEMENT_THRESHOLD).astype(int)
     return df
 
 def fetch_data_with_retry(symbol, start_date, end_date, max_retries=3, retry_delay=5):
@@ -67,11 +89,11 @@ def get_historical_data(symbol, days=None):
         df = fetch_data_with_retry(symbol, start_date, end_date)
         
         # Verify we have enough data
-        if len(df) < 24:  # Need at least 24 hours of data
-            raise ValueError(f"Insufficient data points for {symbol}: got {len(df)}, need at least 24")
+        if len(df) < PREDICTION_WINDOW:  # Need at least PREDICTION_WINDOW hours of data
+            raise ValueError(f"Insufficient data points for {symbol}: got {len(df)}, need at least {PREDICTION_WINDOW}")
         
         df = calculate_technical_indicators(df)
-        df = create_target_variable(df, threshold=0.02)
+        df = create_target_variable(df)
         
         # Drop rows with NaN values
         df = df.dropna()
@@ -89,15 +111,33 @@ def prepare_features(df):
     return df[FEATURE_COLUMNS]
 
 def get_latest_data(symbol):
-    """Get the most recent data for prediction."""
+    """Get the most recent data for prediction with real-time price."""
     try:
-        # Try to get more data than needed to ensure we have enough after processing
+        # Get historical data for technical indicators
         df = get_historical_data(symbol, days=7)  # Get last 7 days of hourly data
         if df is None or df.empty:
             raise ValueError(f"No data available for {symbol}")
+        
+        # Get real-time price data
+        real_time = get_real_time_price(symbol)
+        if real_time and real_time['currentPrice']:
+            # Update the last row with real-time data
+            latest_data = df.iloc[-1:].copy()
+            latest_data.loc[latest_data.index[-1], 'Close'] = real_time['currentPrice']
+            if real_time['open']:
+                latest_data.loc[latest_data.index[-1], 'Open'] = real_time['open']
+            if real_time['high']:
+                latest_data.loc[latest_data.index[-1], 'High'] = real_time['high']
+            if real_time['low']:
+                latest_data.loc[latest_data.index[-1], 'Low'] = real_time['low']
+            if real_time['volume']:
+                latest_data.loc[latest_data.index[-1], 'Volume'] = real_time['volume']
             
-        # Return the most recent complete data point
-        return df.iloc[-1:] if not df.empty else None
+            # Recalculate technical indicators for the updated data
+            latest_data = calculate_technical_indicators(pd.concat([df[:-1], latest_data])).iloc[-1:]
+            return latest_data
+            
+        return df.iloc[-1:]
     except Exception as e:
         print(f"Error in get_latest_data for {symbol}: {str(e)}")
         raise 

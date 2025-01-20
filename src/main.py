@@ -41,6 +41,9 @@ class TrainRequest(BaseModel):
     symbol: str
     test_size: Optional[float] = 0.2
 
+class UntrainRequest(BaseModel):
+    symbols: List[str]
+
 class PredictionRequest(BaseModel):
     symbol: str
     notify: bool = True
@@ -63,6 +66,19 @@ async def train_model(request: TrainRequest, api_key: str = Depends(get_api_key)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/untrain")
+async def untrain_model(request: UntrainRequest, api_key: str = Depends(get_api_key)):
+    """Remove specified symbols from the model's training data."""
+    try:
+        predictor.untrain(request.symbols)
+        return {
+            "status": "success", 
+            "message": f"Symbols removed from training: {', '.join(request.symbols)}",
+            "remaining_symbols": sorted(list(predictor.trained_symbols))
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(request: PredictionRequest, api_key: str = Depends(get_api_key)):
     """Make prediction for a given stock symbol."""
@@ -73,7 +89,7 @@ async def predict(request: PredictionRequest, api_key: str = Depends(get_api_key
             raise HTTPException(status_code=404, detail=f"No data found for {request.symbol}")
         
         # Make prediction
-        prediction, probabilities = predictor.predict(latest_data)
+        prediction, probabilities = predictor.predict(latest_data, request.symbol)
         confidence = probabilities[1] if prediction == 1 else probabilities[0]
         current_price = latest_data['Close'].iloc[-1]
         

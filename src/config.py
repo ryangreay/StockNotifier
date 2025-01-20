@@ -24,10 +24,10 @@ FEATURE_COLUMNS = [
 ]
 
 # Trading Configuration
-PREDICTION_THRESHOLD = 0.75  # Confidence threshold for predictions
-SIGNIFICANT_MOVEMENT_THRESHOLD = 0.04  # 2% movement threshold
+PREDICTION_THRESHOLD = 0.85  # Confidence threshold for predictions
+SIGNIFICANT_MOVEMENT_THRESHOLD = 0.025  # movement threshold
 HISTORICAL_DAYS = 500  # Days of historical data for training
-PREDICTION_WINDOW = 24  # Hours to look ahead for prediction
+PREDICTION_WINDOW = 12  # Hours to look ahead for prediction
 
 # API Configuration
 API_TITLE = "Stock Movement Predictor"
