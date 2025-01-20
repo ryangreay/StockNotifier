@@ -1,0 +1,3 @@
+"""
+Stock Movement Predictor package
+""" 

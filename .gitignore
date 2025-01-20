@@ -1,0 +1,6 @@
+.env
+directions.txt
+Dockerfile
+venv
+venv/*
+models/stock_predictor.joblib

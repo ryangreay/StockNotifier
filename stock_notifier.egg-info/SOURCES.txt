@@ -1,0 +1,14 @@
+README.md
+setup.py
+src/__init__.py
+src/config.py
+src/data_collector.py
+src/main.py
+src/model.py
+src/notifier.py
+src/train_model.py
+stock_notifier.egg-info/PKG-INFO
+stock_notifier.egg-info/SOURCES.txt
+stock_notifier.egg-info/dependency_links.txt
+stock_notifier.egg-info/requires.txt
+stock_notifier.egg-info/top_level.txt
