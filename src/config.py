@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Database Configuration
+DATABASE_URL = os.getenv('DATABASE_URL')
+
 # API Security
 API_KEY = os.getenv('API_KEY')
 
@@ -26,7 +29,7 @@ FEATURE_COLUMNS = [
 # Trading Configuration
 PREDICTION_THRESHOLD = 0.85  # Confidence threshold for predictions
 SIGNIFICANT_MOVEMENT_THRESHOLD = 0.025  # movement threshold
-HISTORICAL_DAYS = 500  # Days of historical data for training
+HISTORICAL_DAYS = 700  # Days of historical data for training
 PREDICTION_WINDOW = 12  # Hours to look ahead for prediction
 
 # API Configuration

@@ -1,19 +1,29 @@
-from fastapi import FastAPI, HTTPException, Security, Depends
+from uuid import uuid4
+from fastapi import FastAPI, HTTPException, Security, Depends, APIRouter, status
+from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.security.api_key import APIKeyHeader
+from jose import JWTError, jwt
 from pydantic import BaseModel
 from typing import List, Optional
 import uvicorn
-from datetime import datetime
+from datetime import datetime, timedelta
+from sqlalchemy.orm import Session
+from . import auth, models, schemas
+from .database import get_db
+from telegram import Bot, Update
+from telegram.ext import CallbackContext
 
 from .model import StockPredictor
 from .notifier import StockNotifier
 from .data_collector import get_latest_data
+from .telegram import TelegramBot
 from .config import (
     API_TITLE,
     API_DESCRIPTION,
     API_VERSION,
     PREDICTION_THRESHOLD,
-    API_KEY
+    API_KEY,
+    TELEGRAM_BOT_TOKEN
 )
 
 app = FastAPI(
@@ -21,6 +31,8 @@ app = FastAPI(
     description=API_DESCRIPTION,
     version=API_VERSION
 )
+
+router = APIRouter()
 
 # API Key security
 api_key_header = APIKeyHeader(name="X-API-Key")
@@ -36,6 +48,7 @@ async def get_api_key(api_key_header: str = Security(api_key_header)):
 # Initialize components
 predictor = StockPredictor()
 notifier = StockNotifier()
+telegram_bot = TelegramBot()  # Initialize the TelegramBot instance
 
 class TrainRequest(BaseModel):
     symbol: str
@@ -56,6 +69,72 @@ class PredictionResponse(BaseModel):
     current_price: float
     notification_sent: Optional[bool] = None
     notification_error: Optional[str] = None
+
+class TelegramConnectRequest(BaseModel):
+    connection_token: str
+    user_id: int
+
+
+
+@app.post("/connect-telegram")
+async def connect_telegram(
+    request: TelegramConnectRequest,
+    api_key: str = Depends(get_api_key),
+    db: Session = Depends(get_db)
+):
+    """Connect user's Telegram account using token."""
+    try:
+        # Verify token and get chat_id
+        connection = telegram_bot.pending_connections.get(request.connection_token)
+        if not connection:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid or expired connection token"
+            )
+        
+        if datetime.now() > connection['expires_at']:
+            telegram_bot.pending_connections.pop(request.connection_token)
+            raise HTTPException(
+                status_code=400,
+                detail="Connection token has expired"
+            )
+        
+        # Get user from database
+        user = db.query(models.User).filter(models.User.id == request.user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+        
+        # Create or update telegram connection
+        telegram_conn = db.query(models.UserTelegramConnection).filter(
+            models.UserTelegramConnection.user_id == user.id
+        ).first()
+        
+        if telegram_conn:
+            telegram_conn.telegram_chat_id = connection['chat_id']
+            telegram_conn.is_active = True
+        else:
+            telegram_conn = models.UserTelegramConnection(
+                user_id=user.id,
+                telegram_chat_id=connection['chat_id'],
+                is_active=True
+            )
+            db.add(telegram_conn)
+        
+        db.commit()
+        
+        # Remove used token
+        telegram_bot.pending_connections.pop(request.connection_token)
+        
+        return {
+            "status": "success",
+            "message": "Telegram account connected successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/train")
 async def train_model(request: TrainRequest, api_key: str = Depends(get_api_key)):
@@ -80,45 +159,211 @@ async def untrain_model(request: UntrainRequest, api_key: str = Depends(get_api_
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict", response_model=PredictionResponse)
-async def predict(request: PredictionRequest, api_key: str = Depends(get_api_key)):
-    """Make prediction for a given stock symbol."""
+async def predict_stock(
+    request: PredictionRequest,
+    api_key: str = Depends(get_api_key),
+    db: Session = Depends(get_db)
+):
+    """Get prediction for a stock symbol."""
     try:
-        # Get latest data
-        latest_data = get_latest_data(request.symbol)
-        if latest_data is None:
-            raise HTTPException(status_code=404, detail=f"No data found for {request.symbol}")
+        # Get latest data and make prediction
+        data = get_latest_data(request.symbol)
+        prediction, probability = predictor.predict(request.symbol, data)
+        current_price = data['Close'].iloc[-1]
         
-        # Make prediction
-        prediction, probabilities = predictor.predict(latest_data, request.symbol)
-        confidence = probabilities[1] if prediction == 1 else probabilities[0]
-        current_price = latest_data['Close'].iloc[-1]
+        notification_sent = None
+        notification_error = None
         
-        response = PredictionResponse(
-            symbol=request.symbol,
-            prediction=int(prediction),
-            confidence=float(confidence),
-            timestamp=datetime.now().isoformat(),
-            current_price=float(current_price)
-        )
+        # Send notification if requested and prediction confidence exceeds threshold
+        if request.notify and max(probability) >= PREDICTION_THRESHOLD:
+            # Get user's stock subscription
+            stock_sub = db.query(models.UserStock).filter(
+                models.UserStock.symbol == request.symbol,
+                models.UserStock.enabled == True
+            ).first()
+            
+            if stock_sub:
+                success, error = await notifier.send_notification(
+                    user_id=stock_sub.user_id,
+                    symbol=request.symbol,
+                    prediction=prediction,
+                    probability=probability,
+                    current_price=current_price,
+                    db=db
+                )
+                notification_sent = success
+                notification_error = error
         
-        # Send notification if requested and confidence exceeds threshold
-        if request.notify and confidence >= PREDICTION_THRESHOLD:
-            success, message = await notifier.send_notification(
-                request.symbol, prediction, probabilities, current_price
-            )
-            response.notification_sent = success
-            if not success:
-                response.notification_error = message
+        return {
+            "symbol": request.symbol,
+            "prediction": prediction,
+            "confidence": max(probability),
+            "timestamp": datetime.now().isoformat(),
+            "current_price": current_price,
+            "notification_sent": notification_sent,
+            "notification_error": notification_error
+        }
         
-        return response
-    
     except Exception as e:
+        # Send error notification if this was a subscribed stock
+        stock_sub = db.query(models.UserStock).filter(
+            models.UserStock.symbol == request.symbol,
+            models.UserStock.enabled == True
+        ).first()
+        
+        if stock_sub:
+            await notifier.send_error_notification(
+                user_id=stock_sub.user_id,
+                symbol=request.symbol,
+                error_message=str(e),
+                db=db
+            )
+        
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check(api_key: str = Depends(get_api_key)):
     """Check if the service is healthy."""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+@router.post("/register", response_model=schemas.Token)
+async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    # Check if user exists
+    db_user = db.query(models.User).filter(models.User.email == user.email).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Create new user
+    hashed_password = auth.get_password_hash(user.password)
+    db_user = models.User(
+        email=user.email,
+        hashed_password=hashed_password,
+        full_name=user.full_name
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    # Create tokens
+    access_token = auth.create_access_token(
+        data={"sub": str(db_user.id)},
+        expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    refresh_token = auth.create_refresh_token(db_user.id, db)
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+@router.post("/token", response_model=schemas.Token)
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    # Find user
+    user = db.query(models.User).filter(models.User.email == form_data.username).first()
+    if not user or not auth.verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Create tokens
+    access_token = auth.create_access_token(
+        data={"sub": str(user.id)},
+        expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    refresh_token = auth.create_refresh_token(user.id, db)
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+@router.post("/google-login", response_model=schemas.Token)
+async def google_login(
+    token_data: schemas.GoogleToken,
+    db: Session = Depends(get_db)
+):
+    # Verify Google token
+    google_data = await auth.verify_google_token(token_data.token)
+    
+    # Find or create user
+    user = db.query(models.User).filter(models.User.email == google_data['email']).first()
+    if not user:
+        user = models.User(
+            email=google_data['email'],
+            full_name=google_data['name'],
+            google_id=google_data['sub']
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    
+    # Create tokens
+    access_token = auth.create_access_token(
+        data={"sub": str(user.id)},
+        expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    refresh_token = auth.create_refresh_token(user.id, db)
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
+@router.post("/refresh-token", response_model=schemas.Token)
+async def refresh_token(
+    token: schemas.RefreshToken,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Verify refresh token
+        payload = jwt.decode(token.refresh_token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=400, detail="Invalid refresh token")
+        
+        # Get stored token
+        db_token = db.query(models.RefreshToken).filter(
+            models.RefreshToken.token == token.refresh_token,
+            models.RefreshToken.expires_at > datetime.utcnow()
+        ).first()
+        
+        if not db_token:
+            raise HTTPException(status_code=400, detail="Invalid or expired refresh token")
+        
+        # Create new tokens
+        access_token = auth.create_access_token(
+            data={"sub": str(db_token.user_id)},
+            expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+        )
+        new_refresh_token = auth.create_refresh_token(db_token.user_id, db)
+        
+        # Delete old refresh token
+        db.delete(db_token)
+        db.commit()
+        
+        return {
+            "access_token": access_token,
+            "refresh_token": new_refresh_token,
+            "token_type": "bearer"
+        }
+        
+    except JWTError:
+        raise HTTPException(status_code=400, detail="Invalid refresh token")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 
