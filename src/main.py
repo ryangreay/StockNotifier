@@ -65,6 +65,10 @@ class PredictionResponse(BaseModel):
     symbol: str
     prediction: int
     confidence: float
+    predicted_movement: str
+    up_probability: float
+    down_probability: float
+    movement_exceeds_threshold: bool
     timestamp: str
     current_price: float
     notification_sent: Optional[bool] = None
@@ -166,38 +170,81 @@ async def predict_stock(
 ):
     """Get prediction for a stock symbol."""
     try:
-        # Get latest data and make prediction
-        data = get_latest_data(request.symbol)
-        prediction, probability = predictor.predict(request.symbol, data)
-        current_price = data['Close'].iloc[-1]
+        # Get user's stock subscription and settings first
+        stock_sub = db.query(models.UserStock, models.UserSettings).join(
+            models.UserSettings,
+            models.UserStock.user_id == models.UserSettings.user_id
+        ).filter(
+            models.UserStock.symbol == request.symbol,
+            models.UserStock.enabled == True
+        ).first()
+        
+        if not stock_sub:
+            raise HTTPException(
+                status_code=404,
+                detail="No active subscription found for this stock"
+            )
+        
+        settings = stock_sub.UserSettings
+        
+        # Get latest data and prepare features using user settings
+        raw_data = get_latest_data(
+            request.symbol,
+            prediction_window=settings.prediction_window,
+            movement_threshold=settings.significant_movement_threshold
+        )
+        features = prepare_features(raw_data)
+        
+        # Make prediction
+        prediction, probabilities = predictor.predict(request.symbol, features)
+        current_price = raw_data['Close'].iloc[-1]
+        
+        # Extract probabilities for each class
+        down_prob = probabilities[0]  # Probability of downward movement (class 0)
+        up_prob = probabilities[1]    # Probability of upward movement (class 1)
+        
+        # Get the confidence (probability of predicted class)
+        confidence = up_prob if prediction == 1 else down_prob
         
         notification_sent = None
         notification_error = None
         
-        # Send notification if requested and prediction confidence exceeds threshold
-        if request.notify and max(probability) >= PREDICTION_THRESHOLD:
-            # Get user's stock subscription
-            stock_sub = db.query(models.UserStock).filter(
-                models.UserStock.symbol == request.symbol,
-                models.UserStock.enabled == True
-            ).first()
-            
-            if stock_sub:
-                success, error = await notifier.send_notification(
-                    user_id=stock_sub.user_id,
-                    symbol=request.symbol,
-                    prediction=prediction,
-                    probability=probability,
-                    current_price=current_price,
-                    db=db
-                )
-                notification_sent = success
-                notification_error = error
+        # Send notification if:
+        # 1. Notification is requested
+        # 2. Confidence exceeds prediction threshold
+        # 3. Predicted movement exceeds significant movement threshold
+        should_notify = (
+            request.notify and
+            confidence >= settings.prediction_threshold and
+            (
+                (prediction == 1 and up_prob >= settings.significant_movement_threshold) or
+                (prediction == 0 and down_prob >= settings.significant_movement_threshold)
+            )
+        )
+        
+        if should_notify:
+            success, error = await notifier.send_notification(
+                user_id=stock_sub.UserStock.user_id,
+                symbol=request.symbol,
+                prediction=prediction,
+                probability=probabilities,
+                current_price=current_price,
+                db=db
+            )
+            notification_sent = success
+            notification_error = error
         
         return {
             "symbol": request.symbol,
             "prediction": prediction,
-            "confidence": max(probability),
+            "confidence": confidence,
+            "predicted_movement": "up" if prediction == 1 else "down",
+            "up_probability": up_prob,
+            "down_probability": down_prob,
+            "movement_exceeds_threshold": (
+                (prediction == 1 and up_prob >= settings.significant_movement_threshold) or
+                (prediction == 0 and down_prob >= settings.significant_movement_threshold)
+            ),
             "timestamp": datetime.now().isoformat(),
             "current_price": current_price,
             "notification_sent": notification_sent,
@@ -206,14 +253,9 @@ async def predict_stock(
         
     except Exception as e:
         # Send error notification if this was a subscribed stock
-        stock_sub = db.query(models.UserStock).filter(
-            models.UserStock.symbol == request.symbol,
-            models.UserStock.enabled == True
-        ).first()
-        
         if stock_sub:
             await notifier.send_error_notification(
-                user_id=stock_sub.user_id,
+                user_id=stock_sub.UserStock.user_id,
                 symbol=request.symbol,
                 error_message=str(e),
                 db=db

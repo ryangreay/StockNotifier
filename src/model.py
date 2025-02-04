@@ -167,7 +167,7 @@ class StockPredictor:
         
         return self.model
     
-    def predict(self, features, symbol):
+    def predict(self, symbol: str, features):
         """Make predictions using the trained model."""
         if not self.is_trained:
             if not self.load_model_from_gcs():

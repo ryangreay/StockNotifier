@@ -10,6 +10,21 @@ from src.config import (
     PREDICTION_WINDOW
 )
 
+def get_interval_and_days(timeframe: str) -> str:
+    """Convert timeframe string to yfinance interval."""
+    timeframe_map = {
+        '1H': '1h',     # 1 hour data
+        '6H': '6h',     # 6 hour data
+        '1D': '1d',     # daily data
+        '1W': '1wk',    # weekly data
+        '1M': '1mo'     # monthly data
+    }
+    
+    if timeframe not in timeframe_map:
+        raise ValueError(f"Invalid timeframe: {timeframe}. Must be one of: {', '.join(timeframe_map.keys())}")
+    
+    return timeframe_map[timeframe]
+
 def get_real_time_price(symbol):
     """Get real-time price data for a symbol."""
     try:
@@ -52,19 +67,19 @@ def calculate_technical_indicators(df):
     
     return df
 
-def create_target_variable(df):
+def create_target_variable(df, prediction_window: int, movement_threshold: float):
     """Create target variable based on future price movements."""
-    # Use PREDICTION_WINDOW for the look-ahead period
-    future_returns = df['Close'].pct_change(periods=PREDICTION_WINDOW).shift(-PREDICTION_WINDOW)
-    df['target'] = (future_returns.abs() > SIGNIFICANT_MOVEMENT_THRESHOLD).astype(int)
+    # Use user's prediction window for the look-ahead period
+    future_returns = df['Close'].pct_change(periods=prediction_window).shift(-prediction_window)
+    df['target'] = (future_returns.abs() > movement_threshold).astype(int)
     return df
 
-def fetch_data_with_retry(symbol, start_date, end_date, max_retries=3, retry_delay=5):
+def fetch_data_with_retry(symbol, interval='1h', max_retries=3, retry_delay=5):
     """Fetch data with retry logic."""
     for attempt in range(max_retries):
         try:
             stock = yf.Ticker(symbol)
-            df = stock.history(start=start_date, end=end_date, interval='1h')
+            df = stock.history(period="max", interval=interval)
             
             if not df.empty:
                 return df
@@ -78,22 +93,21 @@ def fetch_data_with_retry(symbol, start_date, end_date, max_retries=3, retry_del
     
     raise ValueError(f"Failed to fetch data for {symbol} after {max_retries} attempts")
 
-def get_historical_data(symbol, days=None):
-    """Fetch historical data for a given symbol."""
-    days = days or HISTORICAL_DAYS
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
+def get_historical_data(symbol: str, timeframe: str = '1H', prediction_window: int = 12, movement_threshold: float = 0.025):
+    """Fetch historical data for a given symbol with specified timeframe."""
+    interval = get_interval_and_days(timeframe)
     
     try:
         # Try to fetch data with retries
-        df = fetch_data_with_retry(symbol, start_date, end_date)
+        df = fetch_data_with_retry(symbol, interval=interval)
         
         # Verify we have enough data
-        if len(df) < PREDICTION_WINDOW:  # Need at least PREDICTION_WINDOW hours of data
-            raise ValueError(f"Insufficient data points for {symbol}: got {len(df)}, need at least {PREDICTION_WINDOW}")
+        min_periods = max(24, prediction_window) if interval in ['1h', '6h'] else max(7, prediction_window // 24)
+        if len(df) < min_periods:
+            raise ValueError(f"Insufficient data points for {symbol}: got {len(df)}, need at least {min_periods}")
         
         df = calculate_technical_indicators(df)
-        df = create_target_variable(df)
+        df = create_target_variable(df, prediction_window, movement_threshold)
         
         # Drop rows with NaN values
         df = df.dropna()
@@ -110,11 +124,16 @@ def prepare_features(df):
     """Prepare features for model training/prediction."""
     return df[FEATURE_COLUMNS]
 
-def get_latest_data(symbol):
+def get_latest_data(symbol: str, prediction_window: int = 12, movement_threshold: float = 0.025):
     """Get the most recent data for prediction with real-time price."""
     try:
         # Get historical data for technical indicators
-        df = get_historical_data(symbol, days=7)  # Get last 7 days of hourly data
+        df = get_historical_data(
+            symbol, 
+            timeframe='1H',  # Always use hourly data for latest predictions
+            prediction_window=prediction_window,
+            movement_threshold=movement_threshold
+        )
         if df is None or df.empty:
             raise ValueError(f"No data available for {symbol}")
         
