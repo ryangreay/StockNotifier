@@ -124,17 +124,27 @@ def prepare_features(df):
     """Prepare features for model training/prediction."""
     return df[FEATURE_COLUMNS]
 
-def get_latest_data(symbol: str, prediction_window: int = 12, movement_threshold: float = 0.025):
+def get_latest_data(symbol: str, timeframe: str = '1H', prediction_window: int = 12):
     """Get the most recent data for prediction with real-time price."""
     try:
         # Get historical data for technical indicators
-        df = get_historical_data(
-            symbol, 
-            timeframe='1H',  # Always use hourly data for latest predictions
-            prediction_window=prediction_window,
-            movement_threshold=movement_threshold
-        )
-        if df is None or df.empty:
+        interval = get_interval_and_days(timeframe)
+        
+        # Fetch data with retries
+        df = fetch_data_with_retry(symbol, interval=interval)
+        
+        # Verify we have enough data
+        min_periods = max(24, prediction_window) if interval in ['1h', '6h'] else max(7, prediction_window // 24)
+        if len(df) < min_periods:
+            raise ValueError(f"Insufficient data points for {symbol}: got {len(df)}, need at least {min_periods}")
+        
+        # Calculate technical indicators (we don't need target variable for prediction)
+        df = calculate_technical_indicators(df)
+        
+        # Drop rows with NaN values
+        df = df.dropna()
+        
+        if df.empty:
             raise ValueError(f"No data available for {symbol}")
         
         # Get real-time price data

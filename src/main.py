@@ -1,7 +1,6 @@
 from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Security, Depends, APIRouter, status
-from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.security.api_key import APIKeyHeader
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from typing import List, Optional
@@ -15,7 +14,7 @@ from telegram.ext import CallbackContext
 
 from .model import StockPredictor
 from .notifier import StockNotifier
-from .data_collector import get_latest_data
+from .data_collector import get_latest_data, prepare_features
 from .telegram import TelegramBot
 from .config import (
     API_TITLE,
@@ -34,21 +33,35 @@ app = FastAPI(
 
 router = APIRouter()
 
-# API Key security
-api_key_header = APIKeyHeader(name="X-API-Key")
-
-async def get_api_key(api_key_header: str = Security(api_key_header)):
-    if api_key_header != API_KEY:
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid API Key"
-        )
-    return api_key_header
+# OAuth2 scheme for JWT
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # Initialize components
 predictor = StockPredictor()
 notifier = StockNotifier()
-telegram_bot = TelegramBot()  # Initialize the TelegramBot instance
+telegram_bot = TelegramBot()
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+) -> models.User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+        
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user is None:
+        raise credentials_exception
+    return user
 
 class TrainRequest(BaseModel):
     symbol: str
@@ -83,7 +96,7 @@ class TelegramConnectRequest(BaseModel):
 @app.post("/connect-telegram")
 async def connect_telegram(
     request: TelegramConnectRequest,
-    api_key: str = Depends(get_api_key),
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Connect user's Telegram account using token."""
@@ -103,17 +116,16 @@ async def connect_telegram(
                 detail="Connection token has expired"
             )
         
-        # Get user from database
-        user = db.query(models.User).filter(models.User.id == request.user_id).first()
-        if not user:
+        # Verify the user is connecting their own account
+        if current_user.id != request.user_id:
             raise HTTPException(
-                status_code=404,
-                detail="User not found"
+                status_code=403,
+                detail="Cannot connect Telegram for another user"
             )
         
         # Create or update telegram connection
         telegram_conn = db.query(models.UserTelegramConnection).filter(
-            models.UserTelegramConnection.user_id == user.id
+            models.UserTelegramConnection.user_id == current_user.id
         ).first()
         
         if telegram_conn:
@@ -121,7 +133,7 @@ async def connect_telegram(
             telegram_conn.is_active = True
         else:
             telegram_conn = models.UserTelegramConnection(
-                user_id=user.id,
+                user_id=current_user.id,
                 telegram_chat_id=connection['chat_id'],
                 is_active=True
             )
@@ -141,23 +153,63 @@ async def connect_telegram(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/train")
-async def train_model(request: TrainRequest, api_key: str = Depends(get_api_key)):
+async def train_model(
+    request: TrainRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Train the model on historical data for a given stock symbol."""
     try:
-        predictor.train(request.symbol, request.test_size)
+        # Verify user has an active subscription for this symbol
+        stock_sub = db.query(models.UserStock).filter(
+            models.UserStock.user_id == current_user.id,
+            models.UserStock.symbol == request.symbol,
+            models.UserStock.enabled == True
+        ).first()
+        
+        if not stock_sub:
+            raise HTTPException(
+                status_code=404,
+                detail="No active subscription found for this stock"
+            )
+            
+        predictor.train(current_user.id, request.symbol, request.test_size)
         return {"status": "success", "message": f"Model trained successfully for {request.symbol}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/untrain")
-async def untrain_model(request: UntrainRequest, api_key: str = Depends(get_api_key)):
+async def untrain_model(
+    request: UntrainRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Remove specified symbols from the model's training data."""
     try:
-        predictor.untrain(request.symbols)
+        # Verify user has active subscriptions for all symbols
+        subscribed_symbols = db.query(models.UserStock.symbol).filter(
+            models.UserStock.user_id == current_user.id,
+            models.UserStock.symbol.in_(request.symbols),
+            models.UserStock.enabled == True
+        ).all()
+        subscribed_symbols = [s[0] for s in subscribed_symbols]
+        
+        unsubscribed = set(request.symbols) - set(subscribed_symbols)
+        if unsubscribed:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active subscriptions found for symbols: {', '.join(unsubscribed)}"
+            )
+            
+        predictor.untrain(current_user.id, request.symbols)
+        
+        # Get updated trained symbols for this user
+        _, trained_symbols = predictor.get_user_model(current_user.id)
+        
         return {
             "status": "success", 
             "message": f"Symbols removed from training: {', '.join(request.symbols)}",
-            "remaining_symbols": sorted(list(predictor.trained_symbols))
+            "remaining_symbols": sorted(list(trained_symbols))
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -165,16 +217,17 @@ async def untrain_model(request: UntrainRequest, api_key: str = Depends(get_api_
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_stock(
     request: PredictionRequest,
-    api_key: str = Depends(get_api_key),
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Get prediction for a stock symbol."""
     try:
-        # Get user's stock subscription and settings first
+        # Get user's stock subscription and settings
         stock_sub = db.query(models.UserStock, models.UserSettings).join(
             models.UserSettings,
             models.UserStock.user_id == models.UserSettings.user_id
         ).filter(
+            models.UserStock.user_id == current_user.id,
             models.UserStock.symbol == request.symbol,
             models.UserStock.enabled == True
         ).first()
@@ -190,13 +243,17 @@ async def predict_stock(
         # Get latest data and prepare features using user settings
         raw_data = get_latest_data(
             request.symbol,
-            prediction_window=settings.prediction_window,
-            movement_threshold=settings.significant_movement_threshold
+            timeframe=settings.training_timeframe,
+            prediction_window=settings.prediction_window
         )
         features = prepare_features(raw_data)
         
-        # Make prediction
-        prediction, probabilities = predictor.predict(request.symbol, features)
+        # Make prediction using user's model
+        prediction, probabilities = predictor.predict(
+            user_id=current_user.id,
+            symbol=request.symbol,
+            features=features
+        )
         current_price = raw_data['Close'].iloc[-1]
         
         # Extract probabilities for each class
@@ -212,19 +269,11 @@ async def predict_stock(
         # Send notification if:
         # 1. Notification is requested
         # 2. Confidence exceeds prediction threshold
-        # 3. Predicted movement exceeds significant movement threshold
-        should_notify = (
-            request.notify and
-            confidence >= settings.prediction_threshold and
-            (
-                (prediction == 1 and up_prob >= settings.significant_movement_threshold) or
-                (prediction == 0 and down_prob >= settings.significant_movement_threshold)
-            )
-        )
+        should_notify = request.notify and confidence >= settings.prediction_threshold
         
         if should_notify:
             success, error = await notifier.send_notification(
-                user_id=stock_sub.UserStock.user_id,
+                user_id=current_user.id,
                 symbol=request.symbol,
                 prediction=prediction,
                 probability=probabilities,
@@ -241,10 +290,7 @@ async def predict_stock(
             "predicted_movement": "up" if prediction == 1 else "down",
             "up_probability": up_prob,
             "down_probability": down_prob,
-            "movement_exceeds_threshold": (
-                (prediction == 1 and up_prob >= settings.significant_movement_threshold) or
-                (prediction == 0 and down_prob >= settings.significant_movement_threshold)
-            ),
+            "movement_exceeds_threshold": prediction == 1,  # Model already accounts for threshold
             "timestamp": datetime.now().isoformat(),
             "current_price": current_price,
             "notification_sent": notification_sent,
@@ -255,7 +301,7 @@ async def predict_stock(
         # Send error notification if this was a subscribed stock
         if stock_sub:
             await notifier.send_error_notification(
-                user_id=stock_sub.UserStock.user_id,
+                user_id=current_user.id,
                 symbol=request.symbol,
                 error_message=str(e),
                 db=db
@@ -264,9 +310,25 @@ async def predict_stock(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
-async def health_check(api_key: str = Depends(get_api_key)):
-    """Check if the service is healthy."""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+async def health_check():
+    """Check if the service is healthy (public endpoint)."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/health/auth")
+async def health_check_auth(current_user: models.User = Depends(get_current_user)):
+    """Check if the service is healthy (authenticated endpoint)."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "user": {
+            "id": current_user.id,
+            "email": current_user.email,
+            "full_name": current_user.full_name
+        }
+    }
 
 @router.post("/register", response_model=schemas.Token)
 async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -406,6 +468,53 @@ async def refresh_token(
         
     except JWTError:
         raise HTTPException(status_code=400, detail="Invalid refresh token")
+
+# Test user creation endpoint (for development only)
+@app.post("/create-test-user", include_in_schema=False)
+async def create_test_user(db: Session = Depends(get_db)):
+    """Create a test user and return their JWT token (development only)."""
+    # Create test user
+    test_user = models.User(
+        email="test@example.com",
+        full_name="Test User",
+        hashed_password=auth.get_password_hash("testpassword123")
+    )
+    db.add(test_user)
+    db.commit()
+    db.refresh(test_user)
+    
+    # Create user settings
+    test_settings = models.UserSettings(
+        user_id=test_user.id,
+        prediction_threshold=0.85,
+        significant_movement_threshold=0.025,
+        prediction_window=12,
+        training_timeframe='1H'
+    )
+    db.add(test_settings)
+    
+    # Create test stock subscription
+    test_stock = models.UserStock(
+        user_id=test_user.id,
+        symbol="AAPL",
+        enabled=True
+    )
+    db.add(test_stock)
+    
+    db.commit()
+    
+    # Create access token
+    access_token = auth.create_access_token(
+        data={"sub": str(test_user.id)},
+        expires_delta=timedelta(days=1)
+    )
+    
+    return {
+        "user_id": test_user.id,
+        "email": test_user.email,
+        "access_token": access_token,
+        "token_type": "bearer"
+    }
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 

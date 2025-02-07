@@ -6,6 +6,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
 import os
 from google.cloud import storage
+from datetime import datetime
+from collections import OrderedDict
 from src.config import (
     GCS_BUCKET_NAME,
     GCS_MODEL_PATH,
@@ -15,92 +17,160 @@ from src.config import (
 from src.data_collector import get_historical_data, prepare_features
 
 class StockPredictor:
-    def __init__(self):
-        self.model = RandomForestClassifier(
+    def __init__(self, max_models_in_memory=10):
+        """
+        Initialize the StockPredictor with user-specific models.
+        
+        Args:
+            max_models_in_memory (int): Maximum number of models to keep in memory
+        """
+        self.models = OrderedDict()  # user_id -> (model, last_used)
+        self.max_models = max_models_in_memory
+        self.storage_client = storage.Client()
+        self.bucket = self.storage_client.bucket(GCS_BUCKET_NAME)
+        
+    def _get_model_path(self, user_id: int) -> str:
+        """Get the GCS path for a user's model."""
+        return f"models/user_{user_id}/stock_predictor.joblib"
+    
+    def _get_local_path(self, user_id: int) -> str:
+        """Get the local path for a user's model."""
+        return f"/tmp/stock_predictor_{user_id}.joblib"
+    
+    def _create_new_model(self) -> RandomForestClassifier:
+        """Create a new RandomForestClassifier instance."""
+        return RandomForestClassifier(
             n_estimators=100,
             max_depth=10,
             random_state=42,
             class_weight='balanced'
         )
-        self.is_trained = False
-        self.storage_client = storage.Client()
-        self.bucket = self.storage_client.bucket(GCS_BUCKET_NAME)
-        self.trained_symbols = set()  # Keep track of trained symbols
-        self.training_data = {}  # Store training data for each symbol
     
-    def save_model_to_gcs(self):
-        """Save model and trained symbols to GCS."""
-        # Save model locally first
-        os.makedirs(os.path.dirname(LOCAL_MODEL_PATH), exist_ok=True)
+    def _manage_memory(self):
+        """Remove least recently used models if memory limit is reached."""
+        while len(self.models) > self.max_models:
+            # Remove the least recently used model
+            self.models.popitem(last=False)
+    
+    def get_user_model(self, user_id: int) -> tuple:
+        """
+        Get or load a user's model.
         
-        # Save both model and trained symbols
-        save_data = {
-            'model': self.model,
-            'trained_symbols': self.trained_symbols,
-            'training_data': self.training_data
+        Args:
+            user_id (int): The user's ID
+            
+        Returns:
+            tuple: (model, trained_symbols)
+        """
+        # Check if model is in memory
+        if user_id in self.models:
+            model_data = self.models[user_id]
+            # Update last used time
+            self.models.move_to_end(user_id)
+            return model_data['model'], model_data['trained_symbols']
+        
+        # Try to load from GCS
+        try:
+            model_data = self.load_model_from_gcs(user_id)
+            if model_data:
+                self._manage_memory()  # Ensure we don't exceed memory limit
+                self.models[user_id] = {
+                    'model': model_data['model'],
+                    'trained_symbols': model_data['trained_symbols'],
+                    'last_used': datetime.now()
+                }
+                return model_data['model'], model_data['trained_symbols']
+        except Exception as e:
+            print(f"Error loading model for user {user_id}: {str(e)}")
+        
+        # Create new model if none exists
+        model = self._create_new_model()
+        self._manage_memory()
+        self.models[user_id] = {
+            'model': model,
+            'trained_symbols': set(),
+            'last_used': datetime.now()
         }
-        joblib.dump(save_data, LOCAL_MODEL_PATH)
+        return model, set()
+    
+    def save_model_to_gcs(self, user_id: int):
+        """Save user's model and trained symbols to GCS."""
+        if user_id not in self.models:
+            raise ValueError(f"No model found for user {user_id}")
+            
+        model_data = self.models[user_id]
+        local_path = self._get_local_path(user_id)
+        gcs_path = self._get_model_path(user_id)
+        
+        # Ensure local directory exists
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        
+        # Save model data
+        save_data = {
+            'model': model_data['model'],
+            'trained_symbols': model_data['trained_symbols']
+        }
+        joblib.dump(save_data, local_path)
         
         # Upload to GCS
-        blob = self.bucket.blob(GCS_MODEL_PATH)
-        blob.upload_from_filename(LOCAL_MODEL_PATH)
+        blob = self.bucket.blob(gcs_path)
+        blob.upload_from_filename(local_path)
         
         # Clean up local file
-        os.remove(LOCAL_MODEL_PATH)
+        os.remove(local_path)
     
-    def load_model_from_gcs(self):
-        """Load model and trained symbols from GCS."""
+    def load_model_from_gcs(self, user_id: int) -> dict:
+        """Load user's model and trained symbols from GCS."""
         try:
-            # Download from GCS
-            blob = self.bucket.blob(GCS_MODEL_PATH)
-            os.makedirs(os.path.dirname(LOCAL_MODEL_PATH), exist_ok=True)
-            blob.download_to_filename(LOCAL_MODEL_PATH)
+            local_path = self._get_local_path(user_id)
+            gcs_path = self._get_model_path(user_id)
             
-            # Load model and trained symbols
-            save_data = joblib.load(LOCAL_MODEL_PATH)
-            self.model = save_data['model']
-            self.trained_symbols = save_data.get('trained_symbols', set())
-            self.training_data = save_data.get('training_data', {})
-            self.is_trained = True
+            # Download from GCS
+            blob = self.bucket.blob(gcs_path)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            blob.download_to_filename(local_path)
+            
+            # Load model data
+            model_data = joblib.load(local_path)
             
             # Clean up local file
-            os.remove(LOCAL_MODEL_PATH)
-            print(f"Model loaded successfully. Trained on symbols: {', '.join(sorted(self.trained_symbols))}")
-            return True
+            os.remove(local_path)
+            
+            print(f"Model loaded successfully for user {user_id}. "
+                  f"Trained on symbols: {', '.join(sorted(model_data['trained_symbols']))}")
+            return model_data
+            
         except Exception as e:
-            print(f"Error loading model from GCS: {str(e)}")
-            return False
+            print(f"Error loading model for user {user_id} from GCS: {str(e)}")
+            return None
 
-    def untrain(self, symbols):
-        """Remove specified symbols from the model's training data and retrain."""
+    def untrain(self, user_id: int, symbols: list):
+        """Remove specified symbols from the user's model training data and retrain."""
         if isinstance(symbols, str):
             symbols = [symbols]
         
-        if not self.is_trained:
-            if not self.load_model_from_gcs():
-                raise ValueError("No trained model found to untrain")
-
-        # Remove symbols from trained set
-        self.trained_symbols -= set(symbols)
+        model, trained_symbols = self.get_user_model(user_id)
         
-        if not self.trained_symbols:
-            print("No symbols remaining after untrain. Model needs to be trained on new data.")
-            self.is_trained = False
-            self.model = RandomForestClassifier(
-                n_estimators=100,
-                max_depth=10,
-                random_state=42,
-                class_weight='balanced'
-            )
-            self.save_model_to_gcs()
+        # Remove symbols from trained set
+        trained_symbols -= set(symbols)
+        
+        if not trained_symbols:
+            print(f"No symbols remaining after untrain for user {user_id}. Creating new model.")
+            self.models[user_id] = {
+                'model': self._create_new_model(),
+                'trained_symbols': set(),
+                'last_used': datetime.now()
+            }
+            self.save_model_to_gcs(user_id)
             return
-
+        
         # Retrain model on remaining symbols
-        print(f"Retraining model on remaining symbols: {', '.join(sorted(self.trained_symbols))}")
-        self.train(list(self.trained_symbols))
+        print(f"Retraining model for user {user_id} on remaining symbols: "
+              f"{', '.join(sorted(trained_symbols))}")
+        self.train(user_id, list(trained_symbols))
     
-    def train(self, symbols, test_size=0.2):
-        """Train the model on multiple stock symbols."""
+    def train(self, user_id: int, symbols: list, test_size=0.2):
+        """Train the user's model on multiple stock symbols."""
         if isinstance(symbols, str):
             symbols = [symbols]
         
@@ -108,7 +178,7 @@ class StockPredictor:
         all_targets = []
         
         for symbol in symbols:
-            print(f"\nProcessing data for {symbol}...")
+            print(f"\nProcessing data for user {user_id}, symbol {symbol}...")
             try:
                 # Get historical data
                 df = get_historical_data(symbol)
@@ -124,7 +194,7 @@ class StockPredictor:
                 all_targets.append(y)
                 
             except Exception as e:
-                print(f"Error processing {symbol}: {str(e)}")
+                print(f"Error processing {symbol} for user {user_id}: {str(e)}")
                 continue
         
         if not all_features:
@@ -142,36 +212,37 @@ class StockPredictor:
             X, y, test_size=test_size, random_state=42, shuffle=True
         )
         
-        # If model was previously trained, update with new data
-        if self.is_trained:
-            print("\nUpdating existing model with new data...")
-        else:
-            print("\nTraining new model...")
+        # Get or create user's model
+        model, trained_symbols = self.get_user_model(user_id)
         
         # Train the model
-        self.model.fit(X_train, y_train)
-        self.is_trained = True
+        model.fit(X_train, y_train)
         
         # Update trained symbols
-        self.trained_symbols.update(symbols)
+        trained_symbols.update(symbols)
+        
+        # Update model in memory
+        self.models[user_id] = {
+            'model': model,
+            'trained_symbols': trained_symbols,
+            'last_used': datetime.now()
+        }
         
         # Print model performance
-        y_pred = self.model.predict(X_test)
-        print("\nModel Performance Report:")
+        y_pred = model.predict(X_test)
+        print(f"\nModel Performance Report for user {user_id}:")
         print(classification_report(y_test, y_pred))
         
         # Save the model to GCS
-        self.save_model_to_gcs()
-        print(f"\nModel saved to GCS: {GCS_BUCKET_NAME}/{GCS_MODEL_PATH}")
-        print(f"Model is now trained on symbols: {', '.join(sorted(self.trained_symbols))}")
+        self.save_model_to_gcs(user_id)
+        print(f"\nModel saved to GCS for user {user_id}")
+        print(f"Model is now trained on symbols: {', '.join(sorted(trained_symbols))}")
         
-        return self.model
+        return model
     
-    def predict(self, symbol: str, features):
-        """Make predictions using the trained model."""
-        if not self.is_trained:
-            if not self.load_model_from_gcs():
-                raise ValueError("Model not trained. Please train the model first.")
+    def predict(self, user_id: int, symbol: str, features):
+        """Make predictions using the user's trained model."""
+        model, trained_symbols = self.get_user_model(user_id)
         
         # Create a copy of features to avoid modifying the original
         features_copy = features.copy()
@@ -180,29 +251,29 @@ class StockPredictor:
         features_copy['symbol'] = symbol
         
         # Create dummy variables for all known symbols
-        for trained_symbol in self.trained_symbols:
+        for trained_symbol in trained_symbols:
             features_copy[f'symbol_{trained_symbol}'] = 1 if symbol == trained_symbol else 0
         
         # Ensure features match the expected columns
-        missing_cols = set(self.model.feature_names_in_) - set(features_copy.columns)
+        missing_cols = set(model.feature_names_in_) - set(features_copy.columns)
         if missing_cols:
             for col in missing_cols:
                 features_copy[col] = 0
         
         # Select only the columns the model was trained on
-        features_copy = features_copy[self.model.feature_names_in_]
+        features_copy = features_copy[model.feature_names_in_]
         
         # Make prediction and get probability
-        prediction = self.model.predict(features_copy)
-        probability = self.model.predict_proba(features_copy)
+        prediction = model.predict(features_copy)
+        probability = model.predict_proba(features_copy)
+        
+        # Update last used time
+        self.models.move_to_end(user_id)
         
         return prediction[0], probability[0]
 
-    def get_feature_importance(self):
-        """Get feature importance scores."""
-        if not self.is_trained:
-            if not self.load_model_from_gcs():
-                raise ValueError("Model not trained. Please train the model first.")
-        
-        importance = dict(zip(self.model.feature_names_in_, self.model.feature_importances_))
+    def get_feature_importance(self, user_id: int):
+        """Get feature importance scores for user's model."""
+        model, _ = self.get_user_model(user_id)
+        importance = dict(zip(model.feature_names_in_, model.feature_importances_))
         return dict(sorted(importance.items(), key=lambda x: x[1], reverse=True)) 
