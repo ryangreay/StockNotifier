@@ -31,8 +31,6 @@ app = FastAPI(
     version=API_VERSION
 )
 
-router = APIRouter()
-
 # OAuth2 scheme for JWT
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
@@ -40,6 +38,13 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 predictor = StockPredictor()
 notifier = StockNotifier()
 telegram_bot = TelegramBot()
+
+# Create router for auth endpoints
+auth_router = APIRouter(
+    prefix="/auth",
+    tags=["Authentication"],
+    responses={404: {"description": "Not found"}},
+)
 
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
@@ -90,8 +95,6 @@ class PredictionResponse(BaseModel):
 class TelegramConnectRequest(BaseModel):
     connection_token: str
     user_id: int
-
-
 
 @app.post("/connect-telegram")
 async def connect_telegram(
@@ -330,8 +333,15 @@ async def health_check_auth(current_user: models.User = Depends(get_current_user
         }
     }
 
-@router.post("/register", response_model=schemas.Token)
+@auth_router.post("/register", response_model=schemas.Token)
 async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    """
+    Register a new user.
+    
+    - **email**: Valid email address
+    - **full_name**: User's full name
+    - **password**: Password (minimum 8 characters)
+    """
     # Check if user exists
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
     if db_user:
@@ -361,11 +371,17 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
         "token_type": "bearer"
     }
 
-@router.post("/token", response_model=schemas.Token)
+@auth_router.post("/token", response_model=schemas.Token)
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
+    """
+    Login to get access token.
+    
+    - **username**: Email address
+    - **password**: Password
+    """
     # Find user
     user = db.query(models.User).filter(models.User.email == form_data.username).first()
     if not user or not auth.verify_password(form_data.password, user.hashed_password):
@@ -392,12 +408,16 @@ async def login(
         "token_type": "bearer"
     }
 
-@router.post("/google-login", response_model=schemas.Token)
+@auth_router.post("/google-login", response_model=schemas.Token)
 async def google_login(
     token_data: schemas.GoogleToken,
     db: Session = Depends(get_db)
 ):
-    # Verify Google token
+    """
+    Login with Google OAuth token.
+    
+    - **token**: Google OAuth ID token
+    """
     google_data = await auth.verify_google_token(token_data.token)
     
     # Find or create user
@@ -429,11 +449,16 @@ async def google_login(
         "token_type": "bearer"
     }
 
-@router.post("/refresh-token", response_model=schemas.Token)
+@auth_router.post("/refresh-token", response_model=schemas.Token)
 async def refresh_token(
     token: schemas.RefreshToken,
     db: Session = Depends(get_db)
 ):
+    """
+    Get new access token using refresh token.
+    
+    - **refresh_token**: Valid refresh token
+    """
     try:
         # Verify refresh token
         payload = jwt.decode(token.refresh_token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
@@ -469,15 +494,18 @@ async def refresh_token(
     except JWTError:
         raise HTTPException(status_code=400, detail="Invalid refresh token")
 
+# Include the auth router in the main app
+app.include_router(auth_router)
+
 # Test user creation endpoint (for development only)
 @app.post("/create-test-user", include_in_schema=False)
 async def create_test_user(db: Session = Depends(get_db)):
     """Create a test user and return their JWT token (development only)."""
     # Create test user
     test_user = models.User(
-        email="test@example.com",
-        full_name="Test User",
-        hashed_password=auth.get_password_hash("testpassword123")
+        email="arejee@gmail.com",
+        full_name="Ryan Gray",
+        hashed_password=auth.get_password_hash("rockstar11")
     )
     db.add(test_user)
     db.commit()

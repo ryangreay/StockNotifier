@@ -14,6 +14,7 @@ requests>=2.31.0
 google-cloud-storage>=2.14.0
 pytz>=2024.1 
 python-jose[cryptography]>=3.3.0  # For JWT
+pydantic[email]
 passlib[bcrypt]>=1.7.4           # For password hashing
 python-multipart>=0.0.5          # For form data
 google-auth>=2.22.0              # For Google SSO

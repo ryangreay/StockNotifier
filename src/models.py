@@ -26,7 +26,7 @@ class RefreshToken(Base):
 
 class UserTelegramConnection(Base):
     __tablename__ = "user_telegram_connections"
-
+    id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
     telegram_chat_id = Column(String(100))
     connected_at = Column(DateTime(timezone=True), server_default=func.now())
