@@ -10,20 +10,26 @@ from src.config import (
     PREDICTION_WINDOW
 )
 
-def get_interval_and_days(timeframe: str) -> str:
-    """Convert timeframe string to yfinance interval."""
-    timeframe_map = {
+timeframe_map = {
         '1H': '1h',     # 1 hour data
         '6H': '6h',     # 6 hour data
         '1D': '1d',     # daily data
         '1W': '1wk',    # weekly data
         '1M': '1mo'     # monthly data
     }
-    
-    if timeframe not in timeframe_map:
-        raise ValueError(f"Invalid timeframe: {timeframe}. Must be one of: {', '.join(timeframe_map.keys())}")
-    
-    return timeframe_map[timeframe]
+
+# Maximum days of historical data available for each timeframe
+timeframe_max_days = {
+    '1h': 729,     # 2 years of hourly data
+    '6h': 729,     # 2 years of 6-hour data
+    '1d': 7299,    # 20 years of daily data
+    '1wk': 7299,   # 20 years of weekly data
+    '1mo': 7299    # 20 years of monthly data
+}
+
+def get_timeframe_window(interval: str) -> int:
+    """Get the maximum number of days available for a given timeframe."""
+    return timeframe_max_days.get(interval, 729)  # Default to 730 days if unknown interval
 
 def get_real_time_price(symbol):
     """Get real-time price data for a symbol."""
@@ -78,8 +84,13 @@ def fetch_data_with_retry(symbol, interval='1h', max_retries=3, retry_delay=5):
     """Fetch data with retry logic."""
     for attempt in range(max_retries):
         try:
+            # Get the maximum window size for this interval
+            max_days = get_timeframe_window(interval)
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=max_days)
+            
             stock = yf.Ticker(symbol)
-            df = stock.history(period="max", interval=interval)
+            df = stock.history(start=start_date, end=end_date, interval=interval)
             
             if not df.empty:
                 return df
@@ -93,16 +104,15 @@ def fetch_data_with_retry(symbol, interval='1h', max_retries=3, retry_delay=5):
     
     raise ValueError(f"Failed to fetch data for {symbol} after {max_retries} attempts")
 
-def get_historical_data(symbol: str, timeframe: str = '1H', prediction_window: int = 12, movement_threshold: float = 0.025):
+def get_historical_data(symbol: str, timeframe: str = '1h', prediction_window: int = 12, movement_threshold: float = 0.025):
     """Fetch historical data for a given symbol with specified timeframe."""
-    interval = get_interval_and_days(timeframe)
     
     try:
         # Try to fetch data with retries
-        df = fetch_data_with_retry(symbol, interval=interval)
+        df = fetch_data_with_retry(symbol, interval=timeframe)
         
         # Verify we have enough data
-        min_periods = max(24, prediction_window) if interval in ['1h', '6h'] else max(7, prediction_window // 24)
+        min_periods = max(24, prediction_window) if timeframe in ['1h', '6h'] else max(7, prediction_window // 24)
         if len(df) < min_periods:
             raise ValueError(f"Insufficient data points for {symbol}: got {len(df)}, need at least {min_periods}")
         
@@ -124,17 +134,15 @@ def prepare_features(df):
     """Prepare features for model training/prediction."""
     return df[FEATURE_COLUMNS]
 
-def get_latest_data(symbol: str, timeframe: str = '1H', prediction_window: int = 12):
+def get_latest_data(symbol: str, timeframe: str = '1h', prediction_window: int = 12):
     """Get the most recent data for prediction with real-time price."""
     try:
-        # Get historical data for technical indicators
-        interval = get_interval_and_days(timeframe)
         
         # Fetch data with retries
-        df = fetch_data_with_retry(symbol, interval=interval)
+        df = fetch_data_with_retry(symbol, interval=timeframe)
         
         # Verify we have enough data
-        min_periods = max(24, prediction_window) if interval in ['1h', '6h'] else max(7, prediction_window // 24)
+        min_periods = max(24, prediction_window) if timeframe in ['1h', '6h'] else max(7, prediction_window // 24)
         if len(df) < min_periods:
             raise ValueError(f"Insufficient data points for {symbol}: got {len(df)}, need at least {min_periods}")
         

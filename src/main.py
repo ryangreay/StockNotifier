@@ -1,6 +1,7 @@
 from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Security, Depends, APIRouter, status
-from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.openapi.models import OAuthFlows as OAuthFlowsModel
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from typing import List, Optional
@@ -28,11 +29,25 @@ from .config import (
 app = FastAPI(
     title=API_TITLE,
     description=API_DESCRIPTION,
-    version=API_VERSION
+    version=API_VERSION,
+    swagger_ui_init_oauth={
+        "usePkceWithAuthorizationCodeGrant": True,
+    },
+    swagger_ui_parameters={"persistAuthorization": True}
 )
 
-# OAuth2 scheme for JWT
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+# Security schemes for Swagger UI
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/auth/token",  # Updated to match the actual endpoint
+    scheme_name="OAuth2",
+    auto_error=False
+)
+
+bearer_scheme = HTTPBearer(
+    scheme_name="JWT",
+    description="Enter your JWT token",
+    auto_error=False
+)
 
 # Initialize components
 predictor = StockPredictor()
@@ -47,7 +62,7 @@ auth_router = APIRouter(
 )
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
     db: Session = Depends(get_db)
 ) -> models.User:
     credentials_exception = HTTPException(
@@ -56,6 +71,9 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
+        if not credentials:
+            raise credentials_exception
+        token = credentials.credentials
         payload = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
         user_id: str = payload.get("sub")
         if user_id is None:
@@ -176,7 +194,7 @@ async def train_model(
                 detail="No active subscription found for this stock"
             )
             
-        predictor.train(current_user.id, request.symbol, request.test_size)
+        predictor.train(current_user.id, request.symbol, request.test_size, db=db)
         return {"status": "success", "message": f"Model trained successfully for {request.symbol}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -333,6 +351,88 @@ async def health_check_auth(current_user: models.User = Depends(get_current_user
         }
     }
 
+@app.post("/stocks", response_model=List[schemas.UserStockResponse])
+async def add_user_stocks(
+    request: schemas.UserStockCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Add stocks to user's watchlist.
+    
+    - **symbols**: List of stock symbols to add (e.g. ["AAPL", "GOOGL"])
+    
+    Returns a list of added stocks with their status.
+    """
+    added_stocks = []
+    
+    for symbol in request.symbols:
+        # Check if stock already exists for user
+        existing_stock = db.query(models.UserStock).filter(
+            models.UserStock.user_id == current_user.id,
+            models.UserStock.symbol == symbol
+        ).first()
+        
+        if existing_stock:
+            # If exists but disabled, enable it
+            if not existing_stock.enabled:
+                existing_stock.enabled = True
+                db.commit()
+            added_stocks.append(existing_stock)
+            continue
+            
+        # Create new stock subscription
+        new_stock = models.UserStock(
+            user_id=current_user.id,
+            symbol=symbol,
+            enabled=True
+        )
+        db.add(new_stock)
+        db.commit()
+        db.refresh(new_stock)
+        added_stocks.append(new_stock)
+    
+    return added_stocks
+
+@app.put("/settings", response_model=schemas.UserSettings)
+async def update_user_settings(
+    settings: schemas.UserSettings,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update user settings.
+    
+    Settings that can be updated:
+    - **prediction_threshold**: Confidence threshold for predictions (0.0-1.0)
+    - **significant_movement_threshold**: Price movement threshold (0.0-1.0)
+    - **prediction_window**: Hours to look ahead for predictions (>= 1)
+    - **historical_days**: Days of historical data to use (>= 1)
+    - **training_timeframe**: Data timeframe ('1h', '6h', '1d', '1wk', '1mo')
+    - **notification_days**: Binary string for days to notify (e.g. '1111100' for Mon-Fri)
+    - **notify_market_open**: Whether to notify at market open
+    - **notify_midday**: Whether to notify at midday
+    - **notify_market_close**: Whether to notify at market close
+    - **timezone**: User's timezone (e.g. 'America/New_York')
+    """
+    # Get existing settings or create new
+    user_settings = db.query(models.UserSettings).filter(
+        models.UserSettings.user_id == current_user.id
+    ).first()
+    
+    if not user_settings:
+        user_settings = models.UserSettings(user_id=current_user.id)
+        db.add(user_settings)
+    
+    # Update settings
+    for field, value in settings.dict().items():
+        setattr(user_settings, field, value)
+    
+    db.commit()
+    db.refresh(user_settings)
+    
+    return user_settings
+
 @auth_router.post("/register", response_model=schemas.Token)
 async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     """
@@ -372,15 +472,17 @@ async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     }
 
 @auth_router.post("/token", response_model=schemas.Token)
-async def login(
+async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
     """
-    Login to get access token.
+    Get access token using username (email) and password.
     
-    - **username**: Email address
-    - **password**: Password
+    The token can then be used in the Authorize button at the top:
+    1. Click Authorize
+    2. In the "Value" field enter: Bearer your_token_here
+    3. Click Authorize
     """
     # Find user
     user = db.query(models.User).filter(models.User.email == form_data.username).first()

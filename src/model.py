@@ -15,6 +15,8 @@ from src.config import (
     FEATURE_COLUMNS
 )
 from src.data_collector import get_historical_data, prepare_features
+from .database import SessionLocal
+from .models import UserSettings
 
 class StockPredictor:
     def __init__(self, max_models_in_memory=10):
@@ -169,76 +171,102 @@ class StockPredictor:
               f"{', '.join(sorted(trained_symbols))}")
         self.train(user_id, list(trained_symbols))
     
-    def train(self, user_id: int, symbols: list, test_size=0.2):
+    def train(self, user_id: int, symbols: list, test_size=0.2, db=None):
         """Train the user's model on multiple stock symbols."""
         if isinstance(symbols, str):
             symbols = [symbols]
         
-        all_features = []
-        all_targets = []
-        
-        for symbol in symbols:
-            print(f"\nProcessing data for user {user_id}, symbol {symbol}...")
-            try:
-                # Get historical data
-                df = get_historical_data(symbol)
-                
-                # Prepare features and target
-                X = prepare_features(df)
-                y = df['target']
-                
-                # Add symbol as a feature
-                X['symbol'] = symbol
-                
-                all_features.append(X)
-                all_targets.append(y)
-                
-            except Exception as e:
-                print(f"Error processing {symbol} for user {user_id}: {str(e)}")
-                continue
-        
-        if not all_features:
-            raise ValueError("No valid data available for training")
-        
-        # Combine all data
-        X = pd.concat(all_features, axis=0)
-        y = pd.concat(all_targets, axis=0)
-        
-        # Convert symbol to categorical
-        X = pd.get_dummies(X, columns=['symbol'])
-        
-        # Split the data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=42, shuffle=True
-        )
-        
-        # Get or create user's model
-        model, trained_symbols = self.get_user_model(user_id)
-        
-        # Train the model
-        model.fit(X_train, y_train)
-        
-        # Update trained symbols
-        trained_symbols.update(symbols)
-        
-        # Update model in memory
-        self.models[user_id] = {
-            'model': model,
-            'trained_symbols': trained_symbols,
-            'last_used': datetime.now()
-        }
-        
-        # Print model performance
-        y_pred = model.predict(X_test)
-        print(f"\nModel Performance Report for user {user_id}:")
-        print(classification_report(y_test, y_pred))
-        
-        # Save the model to GCS
-        self.save_model_to_gcs(user_id)
-        print(f"\nModel saved to GCS for user {user_id}")
-        print(f"Model is now trained on symbols: {', '.join(sorted(trained_symbols))}")
-        
-        return model
+        # Get user settings from database
+        if not db:
+            db = SessionLocal()
+            should_close_db = True
+        else:
+            should_close_db = False
+            
+        try:
+            # Get user settings
+            user_settings = db.query(UserSettings).filter(
+                UserSettings.user_id == user_id
+            ).first()
+            
+            if not user_settings:
+                raise ValueError(f"No settings found for user {user_id}")
+            
+            all_features = []
+            all_targets = []
+            
+            for symbol in symbols:
+                print(f"\nProcessing data for user {user_id}, symbol {symbol}...")
+                try:
+                    # Get historical data using user settings
+                    df = get_historical_data(
+                        symbol,
+                        timeframe=user_settings.training_timeframe,
+                        prediction_window=user_settings.prediction_window,
+                        movement_threshold=user_settings.significant_movement_threshold
+                    )
+                    
+                    # Prepare features and target
+                    X = prepare_features(df)
+                    y = df['target']
+                    
+                    # Add symbol as a feature
+                    X = X.copy()  # Create an explicit copy
+                    X.loc[:, 'symbol'] = symbol
+                    
+                    all_features.append(X)
+                    all_targets.append(y)
+                    
+                except Exception as e:
+                    print(f"Error processing {symbol} for user {user_id}: {str(e)}")
+                    continue
+            
+            if not all_features:
+                raise ValueError("No valid data available for training")
+            
+            # Combine all data
+            X = pd.concat(all_features, axis=0)
+            y = pd.concat(all_targets, axis=0)
+            
+            # Convert symbol to categorical
+            X = pd.get_dummies(X, columns=['symbol'])
+            
+            # Split the data
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=test_size, random_state=42, shuffle=True
+            )
+            
+            # Get or create user's model
+            model, trained_symbols = self.get_user_model(user_id)
+            
+            # Train the model
+            model.fit(X_train, y_train)
+            
+            # Update trained symbols
+            trained_symbols.update(symbols)
+            
+            # Update model in memory
+            self.models[user_id] = {
+                'model': model,
+                'trained_symbols': trained_symbols,
+                'last_used': datetime.now()
+            }
+            
+            # Print model performance
+            y_pred = model.predict(X_test)
+            print(f"\nModel Performance Report for user {user_id}:")
+            print(classification_report(y_test, y_pred))
+            
+            # Save the model to GCS
+            self.save_model_to_gcs(user_id)
+            print(f"\nModel saved to GCS for user {user_id}")
+            print(f"Model is now trained on symbols: {', '.join(sorted(trained_symbols))}")
+            
+            return model
+            
+        finally:
+            if should_close_db:
+                db.close()
     
     def predict(self, user_id: int, symbol: str, features):
         """Make predictions using the user's trained model."""
