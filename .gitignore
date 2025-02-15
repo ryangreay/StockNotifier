@@ -10,3 +10,7 @@ Dockerfile.scheduler
 fly.scheduler.toml
 fly.toml
 service-account-key.json
+src/__pycache__/*
+init_db.py
+fly.bot.toml
+Dockerfile.bot

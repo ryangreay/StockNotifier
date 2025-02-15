@@ -112,7 +112,6 @@ class PredictionResponse(BaseModel):
 
 class TelegramConnectRequest(BaseModel):
     connection_token: str
-    user_id: int
 
 @app.post("/connect-telegram")
 async def connect_telegram(
@@ -122,26 +121,29 @@ async def connect_telegram(
 ):
     """Connect user's Telegram account using token."""
     try:
-        # Verify token and get chat_id
-        connection = telegram_bot.pending_connections.get(request.connection_token)
-        if not connection:
+        # Find and verify pending connection
+        pending_conn = db.query(models.PendingTelegramConnection).filter(
+            models.PendingTelegramConnection.token == request.connection_token,
+            models.PendingTelegramConnection.expires_at > datetime.now()
+        ).first()
+        
+        if not pending_conn:
             raise HTTPException(
                 status_code=400,
                 detail="Invalid or expired connection token"
             )
         
-        if datetime.now() > connection['expires_at']:
-            telegram_bot.pending_connections.pop(request.connection_token)
+        # Check if this chat is already connected to another user
+        existing_connection = db.query(models.UserTelegramConnection).filter(
+            models.UserTelegramConnection.telegram_chat_id == pending_conn.telegram_chat_id,
+            models.UserTelegramConnection.user_id != current_user.id,
+            models.UserTelegramConnection.is_active == True
+        ).first()
+        
+        if existing_connection:
             raise HTTPException(
                 status_code=400,
-                detail="Connection token has expired"
-            )
-        
-        # Verify the user is connecting their own account
-        if current_user.id != request.user_id:
-            raise HTTPException(
-                status_code=403,
-                detail="Cannot connect Telegram for another user"
+                detail="This Telegram chat is already connected to another user"
             )
         
         # Create or update telegram connection
@@ -150,27 +152,29 @@ async def connect_telegram(
         ).first()
         
         if telegram_conn:
-            telegram_conn.telegram_chat_id = connection['chat_id']
+            telegram_conn.telegram_chat_id = pending_conn.telegram_chat_id
             telegram_conn.is_active = True
         else:
             telegram_conn = models.UserTelegramConnection(
                 user_id=current_user.id,
-                telegram_chat_id=connection['chat_id'],
+                telegram_chat_id=pending_conn.telegram_chat_id,
                 is_active=True
             )
             db.add(telegram_conn)
         
+        # Delete the used pending connection
+        db.delete(pending_conn)
         db.commit()
-        
-        # Remove used token
-        telegram_bot.pending_connections.pop(request.connection_token)
         
         return {
             "status": "success",
             "message": "Telegram account connected successfully"
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/train")
@@ -598,53 +602,6 @@ async def refresh_token(
 
 # Include the auth router in the main app
 app.include_router(auth_router)
-
-# Test user creation endpoint (for development only)
-@app.post("/create-test-user", include_in_schema=False)
-async def create_test_user(db: Session = Depends(get_db)):
-    """Create a test user and return their JWT token (development only)."""
-    # Create test user
-    test_user = models.User(
-        email="arejee@gmail.com",
-        full_name="Ryan Gray",
-        hashed_password=auth.get_password_hash("rockstar11")
-    )
-    db.add(test_user)
-    db.commit()
-    db.refresh(test_user)
-    
-    # Create user settings
-    test_settings = models.UserSettings(
-        user_id=test_user.id,
-        prediction_threshold=0.85,
-        significant_movement_threshold=0.025,
-        prediction_window=12,
-        training_timeframe='1H'
-    )
-    db.add(test_settings)
-    
-    # Create test stock subscription
-    test_stock = models.UserStock(
-        user_id=test_user.id,
-        symbol="AAPL",
-        enabled=True
-    )
-    db.add(test_stock)
-    
-    db.commit()
-    
-    # Create access token
-    access_token = auth.create_access_token(
-        data={"sub": str(test_user.id)},
-        expires_delta=timedelta(days=1)
-    )
-    
-    return {
-        "user_id": test_user.id,
-        "email": test_user.email,
-        "access_token": access_token,
-        "token_type": "bearer"
-    }
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 

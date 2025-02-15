@@ -74,4 +74,8 @@ class UserStockResponse(BaseModel):
     created_at: datetime
 
     class Config:
-        from_attributes = True 
+        from_attributes = True
+
+class TelegramConnectRequest(BaseModel):
+    """Schema for connecting Telegram account."""
+    connection_token: str 

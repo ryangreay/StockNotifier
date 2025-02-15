@@ -71,6 +71,26 @@ class UserTelegramConnection(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'))
-    telegram_chat_id = Column(String(100))
+    telegram_chat_id = Column(String(100), nullable=False)
     connected_at = Column(DateTime(timezone=True), server_default=func.now())
-    is_active = Column(Boolean, default=True) 
+    is_active = Column(Boolean, default=True)
+
+    __table_args__ = (
+        UniqueConstraint('user_id', 'telegram_chat_id'),
+        Index('idx_telegram_chat', 'telegram_chat_id'),
+    )
+
+class PendingTelegramConnection(Base):
+    """Pending Telegram connection model."""
+    __tablename__ = "pending_telegram_connections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String(100), unique=True, nullable=False)
+    telegram_chat_id = Column(String(100), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index('idx_pending_telegram_token', 'token'),
+        Index('idx_pending_telegram_expires', 'expires_at'),
+    ) 

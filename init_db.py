@@ -1,28 +1,10 @@
-from sqlalchemy import create_engine, inspect, text, MetaData
+from sqlalchemy import create_engine, inspect, MetaData
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.schema import DropTable
-from sqlalchemy.ext.compiler import compiles
-from src.models import Base, User, UserSettings, UserStock, RefreshToken, UserTelegramConnection
+from src.models import UserTelegramConnection, PendingTelegramConnection
 from src.config import DATABASE_URL
 
-@compiles(DropTable, "postgresql")
-def _compile_drop_table(element, compiler, **kwargs):
-    return compiler.visit_drop_table(element) + " CASCADE"
-
-def drop_tables(engine):
-    """Drop all tables in the correct order."""
-    print("Dropping existing tables...")
-    
-    # Create MetaData instance
-    metadata = MetaData()
-    metadata.reflect(bind=engine)
-    
-    # Drop all tables
-    metadata.drop_all(bind=engine)
-    print("All tables dropped successfully!")
-
-def init_db():
-    """Initialize database tables."""
+def init_telegram_tables():
+    """Initialize only the Telegram-related tables."""
     try:
         # Print database URL (with password masked)
         db_url_parts = DATABASE_URL.split('@')
@@ -39,32 +21,36 @@ def init_db():
         with engine.connect() as conn:
             print("Database connection successful!")
         
-        # Drop existing tables
-        drop_tables(engine)
+        # Create MetaData instance
+        metadata = MetaData()
         
-        # Create all tables
-        print("\nCreating tables...")
-        Base.metadata.create_all(bind=engine)
+        # Create only the Telegram tables
+        print("\nCreating Telegram tables...")
+        UserTelegramConnection.__table__.create(bind=engine, checkfirst=True)
+        PendingTelegramConnection.__table__.create(bind=engine, checkfirst=True)
         
         # Verify tables were created
         inspector = inspect(engine)
-        table_names = inspector.get_table_names()
+        table_names = ['user_telegram_connections', 'pending_telegram_connections']
         print("\nCreated tables:")
         for table in table_names:
-            print(f"\n  Table: {table}")
-            # Print columns for each table
-            columns = inspector.get_columns(table)
-            for column in columns:
-                print(f"    - {column['name']}: {column['type']}")
-            
-            # Print foreign keys
-            foreign_keys = inspector.get_foreign_keys(table)
-            if foreign_keys:
-                print(f"    Foreign Keys:")
-                for fk in foreign_keys:
-                    print(f"      - {fk['constrained_columns']} -> {fk['referred_table']}.{fk['referred_columns']}")
+            if table in inspector.get_table_names():
+                print(f"\n  Table: {table}")
+                # Print columns for each table
+                columns = inspector.get_columns(table)
+                for column in columns:
+                    print(f"    - {column['name']}: {column['type']}")
+                
+                # Print foreign keys
+                foreign_keys = inspector.get_foreign_keys(table)
+                if foreign_keys:
+                    print(f"    Foreign Keys:")
+                    for fk in foreign_keys:
+                        print(f"      - {fk['constrained_columns']} -> {fk['referred_table']}.{fk['referred_columns']}")
+            else:
+                print(f"\n  Warning: Table {table} was not created!")
         
-        print("\nDatabase initialization complete!")
+        print("\nTelegram tables initialization complete!")
         
     except SQLAlchemyError as e:
         print(f"\nDatabase error: {str(e)}")
@@ -74,5 +60,5 @@ def init_db():
         raise
 
 if __name__ == "__main__":
-    print("Starting database initialization...")
-    init_db() 
+    print("Starting Telegram tables initialization...")
+    init_telegram_tables() 

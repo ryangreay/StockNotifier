@@ -34,14 +34,14 @@ class StockNotifier:
             return False, "User settings not found"
         
         # Format the time window based on the prediction window
-        if user_settings.training_timeframe == '1H':
+        if user_settings.training_timeframe == '1h':
             time_text = f"{user_settings.prediction_window} hours"
-        elif user_settings.training_timeframe == '1D':
-            time_text = f"{user_settings.prediction_window // 24} days"
-        elif user_settings.training_timeframe == '1W':
-            time_text = f"{user_settings.prediction_window // (24 * 7)} weeks"
-        elif user_settings.training_timeframe == '1M':
-            time_text = f"{user_settings.prediction_window // (24 * 30)} months"
+        elif user_settings.training_timeframe == '1d':
+            time_text = f"{user_settings.prediction_window // 24} day(s)"
+        elif user_settings.training_timeframe == '1wk':
+            time_text = f"{user_settings.prediction_window // (24 * 7)} week(s)"
+        elif user_settings.training_timeframe == '1mo':
+            time_text = f"{user_settings.prediction_window // (24 * 30)} month(s)"
         else:
             time_text = f"{user_settings.prediction_window} hours"  # fallback
         
