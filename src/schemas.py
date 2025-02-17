@@ -66,6 +66,10 @@ class UserStockCreate(BaseModel):
     """Schema for adding user stocks."""
     symbols: list[str] = Field(..., min_items=1)  # At least one symbol required
 
+class UserStockRemove(BaseModel):
+    """Schema for removing user stocks."""
+    symbols: list[str] = Field(..., min_items=1)  # At least one symbol required
+
 class UserStockResponse(BaseModel):
     """Schema for user stock response."""
     user_id: int

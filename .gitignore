@@ -10,3 +10,5 @@ init_db.py
 setup.py
 lambda_deployment.zip
 lambda_layer
+src/__pycache__/main.cpython-312.pyc
+src/__pycache__/schemas.cpython-312.pyc

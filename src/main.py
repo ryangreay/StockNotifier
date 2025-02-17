@@ -382,6 +382,7 @@ async def add_user_stocks(
             if not existing_stock.enabled:
                 existing_stock.enabled = True
                 db.commit()
+                db.refresh(existing_stock)            
             added_stocks.append(existing_stock)
             continue
             
@@ -397,6 +398,61 @@ async def add_user_stocks(
         added_stocks.append(new_stock)
     
     return added_stocks
+
+@app.get("/stocks", response_model=List[schemas.UserStockResponse])
+async def get_user_stocks(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all active stocks in user's watchlist.
+    
+    Returns a list of stocks that the user is currently monitoring.
+    """
+    stocks = db.query(models.UserStock).filter(
+        models.UserStock.user_id == current_user.id,
+        models.UserStock.enabled == True
+    ).order_by(models.UserStock.symbol).all()
+    
+    return stocks
+
+@app.delete("/stocks", response_model=List[schemas.UserStockResponse])
+async def remove_user_stocks(
+    request: schemas.UserStockRemove,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Remove stocks from user's watchlist.
+    
+    - **symbols**: List of stock symbols to remove (e.g. ["AAPL", "GOOGL"])
+    
+    Returns a list of removed stocks.
+    """
+    removed_stocks = []
+    
+    for symbol in request.symbols:
+        # Find the stock subscription
+        stock = db.query(models.UserStock).filter(
+            models.UserStock.user_id == current_user.id,
+            models.UserStock.symbol == symbol,
+            models.UserStock.enabled == True
+        ).first()
+        
+        if stock:
+            # Disable the stock subscription instead of deleting it
+            stock.enabled = False
+            db.commit()
+            db.refresh(stock)
+            removed_stocks.append(stock)
+    
+    if not removed_stocks:
+        raise HTTPException(
+            status_code=404,
+            detail="No active subscriptions found for the specified symbols"
+        )
+    
+    return removed_stocks
 
 @app.put("/settings", response_model=schemas.UserSettings)
 async def update_user_settings(
@@ -485,7 +541,7 @@ async def login_for_access_token(
     
     The token can then be used in the Authorize button at the top:
     1. Click Authorize
-    2. In the "Value" field enter: Bearer your_token_here
+    2. In the "Value" field enter: Bearer token
     3. Click Authorize
     """
     # Find user
