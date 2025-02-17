@@ -1,0 +1,34 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install required system packages
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app
+ENV PYTHONASYNCIODEBUG=1
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy only the necessary files
+COPY src/ src/
+COPY .env .
+
+# Create directory for GCP credentials if needed
+RUN mkdir -p /gcp
+COPY service-account-key.json /gcp/
+ENV GOOGLE_APPLICATION_CREDENTIALS=/gcp/service-account-key.json
+
+# Use tini as init system
+RUN apt-get update && apt-get install -y tini && rm -rf /var/lib/apt/lists/*
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Command to run the bot
+CMD ["python", "-m", "src.bot"] 

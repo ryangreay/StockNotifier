@@ -1,0 +1,16 @@
+app = "stock-notifier-bot"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile.bot"
+
+[env]
+  PYTHON_ENV = "production"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256  # Minimal memory for the bot
+
+[processes]
+  bot = "python -m src.bot" 
