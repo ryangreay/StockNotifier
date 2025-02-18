@@ -12,6 +12,7 @@ from . import auth, models, schemas
 from .database import get_db
 from telegram import Bot, Update
 from telegram.ext import CallbackContext
+from fastapi.middleware.cors import CORSMiddleware
 
 from .model import StockPredictor
 from .notifier import StockNotifier
@@ -34,6 +35,15 @@ app = FastAPI(
         "usePkceWithAuthorizationCodeGrant": True,
     },
     swagger_ui_parameters={"persistAuthorization": True}
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # Add your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
 
 # Security schemes for Swagger UI
@@ -493,6 +503,31 @@ async def update_user_settings(
     
     return user_settings
 
+@app.get("/settings", response_model=schemas.UserSettings)
+async def get_user_settings(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get user settings.
+    
+    Returns the current settings for the authenticated user.
+    If no settings exist, returns default settings.
+    """
+    # Get existing settings
+    user_settings = db.query(models.UserSettings).filter(
+        models.UserSettings.user_id == current_user.id
+    ).first()
+    
+    if not user_settings:
+        # Create default settings if none exist
+        user_settings = models.UserSettings(user_id=current_user.id)
+        db.add(user_settings)
+        db.commit()
+        db.refresh(user_settings)
+    
+    return user_settings
+
 @auth_router.post("/register", response_model=schemas.Token)
 async def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     """
@@ -655,6 +690,22 @@ async def refresh_token(
         
     except JWTError:
         raise HTTPException(status_code=400, detail="Invalid refresh token")
+
+@app.get("/telegram-status")
+async def get_telegram_status(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Check if user has an active Telegram connection."""
+    telegram_conn = db.query(models.UserTelegramConnection).filter(
+        models.UserTelegramConnection.user_id == current_user.id,
+        models.UserTelegramConnection.is_active == True
+    ).first()
+    
+    return {
+        "is_connected": telegram_conn is not None,
+        "connected_at": telegram_conn.connected_at if telegram_conn else None
+    }
 
 # Include the auth router in the main app
 app.include_router(auth_router)
