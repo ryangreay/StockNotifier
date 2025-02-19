@@ -3,12 +3,27 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import time
+import redis
+import json
 from src.config import (
     HISTORICAL_DAYS,
     FEATURE_COLUMNS,
     SIGNIFICANT_MOVEMENT_THRESHOLD,
-    PREDICTION_WINDOW
+    PREDICTION_WINDOW,
+    REDIS_URL
 )
+
+# Initialize Redis client for caching
+redis_client = redis.from_url(REDIS_URL) if REDIS_URL else None
+
+# Cache configuration
+CACHE_EXPIRY = {
+    '1h': 300,    # 5 minutes for hourly data
+    '6h': 1800,   # 30 minutes for 6-hour data
+    '1d': 3600,   # 1 hour for daily data
+    '1wk': 86400, # 24 hours for weekly data
+    '1mo': 86400  # 24 hours for monthly data
+}
 
 timeframe_map = {
         '1H': '1h',     # 1 hour data
@@ -31,18 +46,64 @@ def get_timeframe_window(interval: str) -> int:
     """Get the maximum number of days available for a given timeframe."""
     return timeframe_max_days.get(interval, 729)  # Default to 730 days if unknown interval
 
+def get_cached_data(symbol: str, interval: str):
+    """Get data from cache if available."""
+    if not redis_client:
+        return None
+        
+    cache_key = f"stock_data:{symbol}:{interval}"
+    cached_data = redis_client.get(cache_key)
+    
+    if cached_data:
+        try:
+            data_dict = json.loads(cached_data)
+            return pd.DataFrame.from_dict(data_dict)
+        except Exception as e:
+            print(f"Error loading cached data: {str(e)}")
+    
+    return None
+
+def cache_data(symbol: str, interval: str, df: pd.DataFrame):
+    """Cache stock data in Redis."""
+    if not redis_client:
+        return
+        
+    try:
+        cache_key = f"stock_data:{symbol}:{interval}"
+        data_dict = df.to_dict()
+        redis_client.setex(
+            cache_key,
+            CACHE_EXPIRY[interval],
+            json.dumps(data_dict)
+        )
+    except Exception as e:
+        print(f"Error caching data: {str(e)}")
+
 def get_real_time_price(symbol):
-    """Get real-time price data for a symbol."""
+    """Get real-time price data for a symbol with caching."""
+    cache_key = f"realtime_price:{symbol}"
+    
+    if redis_client:
+        cached_price = redis_client.get(cache_key)
+        if cached_price:
+            return json.loads(cached_price)
+    
     try:
         stock = yf.Ticker(symbol)
         info = stock.get_info()
-        return {
+        price_data = {
             'currentPrice': info.get('regularMarketPrice', None),
             'open': info.get('regularMarketOpen', None),
             'high': info.get('regularMarketDayHigh', None),
             'low': info.get('regularMarketDayLow', None),
             'volume': info.get('regularMarketVolume', None)
         }
+        
+        # Cache the price data for 1 minute
+        if redis_client:
+            redis_client.setex(cache_key, 60, json.dumps(price_data))
+            
+        return price_data
     except Exception as e:
         print(f"Error getting real-time price for {symbol}: {str(e)}")
         return None
@@ -80,27 +141,42 @@ def create_target_variable(df, prediction_window: int, movement_threshold: float
     df['target'] = (future_returns.abs() > movement_threshold).astype(int)
     return df
 
-def fetch_data_with_retry(symbol, interval='1h', max_retries=3, retry_delay=5):
-    """Fetch data with retry logic."""
+def fetch_data_with_retry(symbol, interval='1h', max_retries=5, initial_delay=5):
+    """Fetch data with exponential backoff retry logic."""
     for attempt in range(max_retries):
         try:
+            # First check cache
+            cached_data = get_cached_data(symbol, interval)
+            if cached_data is not None:
+                print(f"Using cached data for {symbol}")
+                return cached_data
+            
             # Get the maximum window size for this interval
             max_days = get_timeframe_window(interval)
             end_date = datetime.now()
             start_date = end_date - timedelta(days=max_days)
             
+            # Add delay with exponential backoff
+            if attempt > 0:
+                delay = initial_delay * (2 ** (attempt - 1))
+                print(f"Attempt {attempt + 1}: Waiting {delay} seconds before retry...")
+                time.sleep(delay)
+            
             stock = yf.Ticker(symbol)
             df = stock.history(start=start_date, end=end_date, interval=interval)
             
             if not df.empty:
+                # Cache the successful response
+                cache_data(symbol, interval, df)
                 return df
             
             print(f"Attempt {attempt + 1}: Empty data received for {symbol}, retrying...")
         except Exception as e:
             print(f"Attempt {attempt + 1}: Error fetching data for {symbol}: {str(e)}")
-        
-        if attempt < max_retries - 1:
-            time.sleep(retry_delay)
+            
+            # If this is the last attempt, raise the error
+            if attempt == max_retries - 1:
+                raise
     
     raise ValueError(f"Failed to fetch data for {symbol} after {max_retries} attempts")
 
