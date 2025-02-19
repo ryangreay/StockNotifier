@@ -1,6 +1,6 @@
 # Stock Movement Predictor
 
-An ML-driven application that predicts significant stock price movements and sends push notifications. API available at https://stock-notifier-api.fly.dev/docs
+An ML-driven application that predicts significant stock price movements and sends push notifications. API available at https://stock-predictor-api.fly.dev/docs
 
 ## Features
 - Machine Learning model (Random Forest Classifier) trained on historical stock data
