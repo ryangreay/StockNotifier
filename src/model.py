@@ -194,6 +194,7 @@ class StockPredictor:
             
             all_features = []
             all_targets = []
+            performance_metrics = {}
             
             for symbol in symbols:
                 print(f"\nProcessing data for user {user_id}, symbol {symbol}...")
@@ -205,6 +206,37 @@ class StockPredictor:
                         prediction_window=user_settings.prediction_window,
                         movement_threshold=user_settings.significant_movement_threshold
                     )
+                    
+                    # Calculate stock performance metrics
+                    total_return = ((df['Close'].iloc[-1] - df['Close'].iloc[0]) / df['Close'].iloc[0]) * 100
+                    daily_returns = df['Close'].pct_change()
+                    volatility = daily_returns.std() * np.sqrt(252) * 100  # Annualized volatility
+                    max_drawdown = ((df['Close'].cummax() - df['Close']) / df['Close'].cummax()).max() * 100
+                    avg_volume = df['Volume'].mean()
+                    
+                    # Handle date formatting safely
+                    try:
+                        start_date = pd.to_datetime(df.index[0]).strftime('%Y-%m-%d') if isinstance(df.index[0], str) else df.index[0].strftime('%Y-%m-%d')
+                        end_date = pd.to_datetime(df.index[-1]).strftime('%Y-%m-%d') if isinstance(df.index[-1], str) else df.index[-1].strftime('%Y-%m-%d')
+                    except Exception as e:
+                        print(f"Warning: Error formatting dates for {symbol}: {str(e)}")
+                        start_date = str(df.index[0])
+                        end_date = str(df.index[-1])
+                    
+                    # Store performance metrics
+                    performance_metrics[symbol] = {
+                        'total_return': round(total_return, 2),
+                        'volatility': round(volatility, 2),
+                        'max_drawdown': round(max_drawdown, 2),
+                        'avg_volume': int(avg_volume),
+                        'data_points': len(df),
+                        'date_range': {
+                            'start': start_date,
+                            'end': end_date
+                        },
+                        'current_price': round(float(df['Close'].iloc[-1]), 2),
+                        'significant_movements': round(float((df['target'] == 1).mean() * 100), 2)  # Percentage of significant movements
+                    }
                     
                     # Prepare features and target
                     X = prepare_features(df)
@@ -252,17 +284,77 @@ class StockPredictor:
                 'last_used': datetime.now()
             }
             
-            # Print model performance
+            # Calculate model performance metrics
             y_pred = model.predict(X_test)
-            print(f"\nModel Performance Report for user {user_id}:")
-            print(classification_report(y_test, y_pred))
+            y_pred_proba = model.predict_proba(X_test)
+            
+            from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+            
+            classification_metrics = classification_report(y_test, y_pred, output_dict=True)
+            conf_matrix = confusion_matrix(y_test, y_pred)
+            roc_auc = roc_auc_score(y_test, y_pred_proba[:, 1])
+            
+            # Get feature importance
+            feature_importance = dict(zip(model.feature_names_in_, model.feature_importances_))
+            top_features = dict(sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:5])
+            
+            # Calculate class distribution for weighted metrics
+            class_distribution = {
+                'no_movement': float((y_test == 0).mean()),
+                'significant_movement': float((y_test == 1).mean())
+            }
+            
+            model_metrics = {
+                'accuracy': round(classification_metrics['accuracy'] * 100, 2),
+                'precision': round(classification_metrics['weighted avg']['precision'] * 100, 2),
+                'recall': round(classification_metrics['weighted avg']['recall'] * 100, 2),
+                'f1_score': round(classification_metrics['weighted avg']['f1-score'] * 100, 2),
+                'roc_auc': round(roc_auc * 100, 2),
+                'class_metrics': {
+                    'no_movement': {
+                        'precision': round(classification_metrics['0']['precision'] * 100, 2),
+                        'recall': round(classification_metrics['0']['recall'] * 100, 2),
+                        'f1_score': round(classification_metrics['0']['f1-score'] * 100, 2),
+                        'support': int(classification_metrics['0']['support'])
+                    },
+                    'significant_movement': {
+                        'precision': round(classification_metrics['1']['precision'] * 100, 2),
+                        'recall': round(classification_metrics['1']['recall'] * 100, 2),
+                        'f1_score': round(classification_metrics['1']['f1-score'] * 100, 2),
+                        'support': int(classification_metrics['1']['support'])
+                    }
+                },
+                'class_distribution': {
+                    'no_movement': round(class_distribution['no_movement'] * 100, 2),
+                    'significant_movement': round(class_distribution['significant_movement'] * 100, 2)
+                },
+                'confusion_matrix': {
+                    'true_negative': int(conf_matrix[0][0]),
+                    'false_positive': int(conf_matrix[0][1]),
+                    'false_negative': int(conf_matrix[1][0]),
+                    'true_positive': int(conf_matrix[1][1])
+                },
+                'top_features': {k: round(v * 100, 2) for k, v in top_features.items()},
+                'training_samples': len(y_train),
+                'test_samples': len(y_test)
+            }
             
             # Save the model to GCS
             self.save_model_to_gcs(user_id)
             print(f"\nModel saved to GCS for user {user_id}")
             print(f"Model is now trained on symbols: {', '.join(sorted(trained_symbols))}")
             
-            return model
+            # Return comprehensive metrics
+            return {
+                'model_performance': model_metrics,
+                'stock_performance': performance_metrics,
+                'training_info': {
+                    'timeframe': user_settings.training_timeframe,
+                    'prediction_window': user_settings.prediction_window,
+                    'movement_threshold': user_settings.significant_movement_threshold,
+                    'trained_symbols': list(trained_symbols)
+                }
+            }
             
         finally:
             if should_close_db:

@@ -193,7 +193,7 @@ async def train_model(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Train the model on historical data for a given stock symbol."""
+    """Train model for a stock symbol."""
     try:
         # Verify user has an active subscription for this symbol
         stock_sub = db.query(models.UserStock).filter(
@@ -207,11 +207,28 @@ async def train_model(
                 status_code=404,
                 detail="No active subscription found for this stock"
             )
-            
-        predictor.train(current_user.id, request.symbol, request.test_size, db=db)
-        return {"status": "success", "message": f"Model trained successfully for {request.symbol}"}
+        
+        # Train the model
+        metrics = predictor.train(
+            user_id=current_user.id,
+            symbols=[request.symbol],
+            test_size=request.test_size,
+            db=db
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Model trained successfully for {request.symbol}",
+            "metrics": metrics,
+            "symbol": request.symbol,
+            "test_size": request.test_size
+        }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error training model: {str(e)}"
+        )
 
 @app.post("/untrain")
 async def untrain_model(
