@@ -10,6 +10,15 @@ DATABASE_URL = os.getenv('DATABASE_CONN')
 # API Security
 API_KEY = os.getenv('API_KEY')
 
+# Alpha Vantage Configuration
+ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY')
+
+# Finnhub Configuration
+FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
+
+# Redis Configuration
+REDIS_URL = os.getenv('REDIS_URL')
+
 # Telegram Configuration
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
