@@ -634,17 +634,52 @@ async def google_login(
     """
     google_data = await auth.verify_google_token(token_data.token)
     
-    # Find or create user
-    user = db.query(models.User).filter(models.User.email == google_data['email']).first()
+    # First try to find user by google_id (most reliable method)
+    user = db.query(models.User).filter(
+        models.User.google_id == google_data['sub']
+    ).first()
+    
     if not user:
-        user = models.User(
-            email=google_data['email'],
-            full_name=google_data['name'],
-            google_id=google_data['sub']
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+        # If no user found by google_id, check email
+        existing_user = db.query(models.User).filter(
+            models.User.email == google_data['email']
+        ).first()
+        
+        if existing_user:
+            if existing_user.hashed_password:
+                # User exists with password (email signup) - don't allow Google login
+                raise HTTPException(
+                    status_code=400,
+                    detail="Email already registered with password. Please use email login."
+                )
+            elif existing_user.google_id and existing_user.google_id != google_data['sub']:
+                # User exists with different Google account
+                raise HTTPException(
+                    status_code=400,
+                    detail="Email already registered with different Google account."
+                )
+            else:
+                # Update existing user with google_id if missing
+                existing_user.google_id = google_data['sub']
+                user = existing_user
+        else:
+            # Create new user
+            user = models.User(
+                email=google_data['email'],
+                full_name=google_data['name'],
+                google_id=google_data['sub'],
+                hashed_password=None  # Explicitly set None for Google users
+            )
+            db.add(user)
+    
+    # Update user info if needed
+    if user.full_name != google_data['name']:
+        user.full_name = google_data['name']
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
+    db.refresh(user)
     
     # Create tokens
     access_token = auth.create_access_token(
@@ -652,10 +687,6 @@ async def google_login(
         expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     refresh_token = auth.create_refresh_token(user.id, db)
-    
-    # Update last login
-    user.last_login = datetime.utcnow()
-    db.commit()
     
     return {
         "access_token": access_token,
