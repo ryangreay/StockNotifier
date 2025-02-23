@@ -71,6 +71,10 @@ auth_router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+# Create routers
+stocks_router = APIRouter(prefix="/stocks", tags=["stocks"])
+user_stocks_router = APIRouter(prefix="/users/stocks", tags=["user stocks"])
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
     db: Session = Depends(get_db)
@@ -382,7 +386,7 @@ async def health_check_auth(current_user: models.User = Depends(get_current_user
         }
     }
 
-@app.post("/stocks", response_model=List[schemas.UserStockResponse])
+@app.post("/users/stocks", response_model=List[schemas.UserStockResponse])
 async def add_user_stocks(
     request: schemas.UserStockCreate,
     current_user: models.User = Depends(get_current_user),
@@ -395,8 +399,22 @@ async def add_user_stocks(
     
     Returns a list of added stocks with their status.
     """
-    added_stocks = []
+    # First verify all stocks exist in available_stocks and are enabled
+    available_stocks = db.query(models.AvailableStock).filter(
+        models.AvailableStock.symbol.in_(request.symbols),
+        models.AvailableStock.enabled == True
+    ).all()
     
+    # Check if any symbols are not available or not enabled
+    available_symbols = {stock.symbol for stock in available_stocks}
+    invalid_symbols = set(request.symbols) - available_symbols
+    if invalid_symbols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The following symbols are not available or not enabled: {', '.join(invalid_symbols)}"
+        )
+    
+    added_stocks = []
     for symbol in request.symbols:
         # Check if stock already exists for user
         existing_stock = db.query(models.UserStock).filter(
@@ -426,7 +444,7 @@ async def add_user_stocks(
     
     return added_stocks
 
-@app.get("/stocks", response_model=List[schemas.UserStockResponse])
+@app.get("/users/stocks", response_model=List[schemas.UserStockResponse])
 async def get_user_stocks(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -443,7 +461,7 @@ async def get_user_stocks(
     
     return stocks
 
-@app.delete("/stocks", response_model=List[schemas.UserStockResponse])
+@app.delete("/users/stocks", response_model=List[schemas.UserStockResponse])
 async def remove_user_stocks(
     request: schemas.UserStockRemove,
     current_user: models.User = Depends(get_current_user),
@@ -481,7 +499,7 @@ async def remove_user_stocks(
     
     return removed_stocks
 
-@app.put("/settings", response_model=schemas.UserSettings)
+@app.put("/users/settings", response_model=schemas.UserSettings)
 async def update_user_settings(
     settings: schemas.UserSettings,
     current_user: models.User = Depends(get_current_user),
@@ -520,7 +538,7 @@ async def update_user_settings(
     
     return user_settings
 
-@app.get("/settings", response_model=schemas.UserSettings)
+@app.get("/users/settings", response_model=schemas.UserSettings)
 async def get_user_settings(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -755,7 +773,26 @@ async def get_telegram_status(
         "connected_at": telegram_conn.connected_at if telegram_conn else None
     }
 
-# Include the auth router in the main app
+@app.get("/stocks", response_model=List[schemas.AvailableStockResponse])
+async def get_available_stocks(
+    enabled: Optional[bool] = None,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get list of available stocks.
+    
+    Parameters:
+    - **enabled**: Optional filter for enabled/disabled stocks
+    
+    Returns list of stocks with their symbols, names, and enabled status.
+    """
+    query = db.query(models.AvailableStock)
+    if enabled is not None:
+        query = query.filter(models.AvailableStock.enabled == enabled)
+    return query.order_by(models.AvailableStock.name).all()
+
+# Add routers to app
 app.include_router(auth_router)
 
 if __name__ == "__main__":

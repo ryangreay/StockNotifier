@@ -80,6 +80,25 @@ class UserStockResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class AvailableStockBase(BaseModel):
+    """Base schema for available stocks."""
+    symbol: str
+    name: str
+    enabled: bool = True
+
+class AvailableStockCreate(AvailableStockBase):
+    """Schema for creating available stocks."""
+    pass
+
+class AvailableStockResponse(AvailableStockBase):
+    """Schema for available stock response."""
+    id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
 class TelegramConnectRequest(BaseModel):
     """Schema for connecting Telegram account."""
     connection_token: str 

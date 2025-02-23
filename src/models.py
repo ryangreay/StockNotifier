@@ -16,6 +16,22 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_login = Column(DateTime(timezone=True), nullable=True)
 
+class AvailableStock(Base):
+    """Available stocks that can be tracked in the app."""
+    __tablename__ = "available_stocks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(10), unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        Index('idx_available_stocks_enabled', 'enabled'),
+        Index('idx_available_stocks_symbol', 'symbol'),
+    )
+
 class UserSettings(Base):
     """User settings model."""
     __tablename__ = "user_settings"
