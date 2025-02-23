@@ -13,8 +13,14 @@ class User(Base):
     full_name = Column(String)
     google_id = Column(String, unique=True, nullable=True)
     is_active = Column(Boolean, default=True)
+    is_deleted = Column(Boolean, default=False)  # For soft deletion
+    deleted_at = Column(DateTime(timezone=True), nullable=True)  # When the user was soft deleted
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_login = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index('idx_user_active_deleted', 'is_active', 'is_deleted'),
+    )
 
 class AvailableStock(Base):
     """Available stocks that can be tracked in the app."""

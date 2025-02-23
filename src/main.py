@@ -13,6 +13,7 @@ from .database import get_db
 from telegram import Bot, Update
 from telegram.ext import CallbackContext
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import and_, func
 
 from .model import StockPredictor
 from .notifier import StockNotifier
@@ -85,19 +86,33 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        if not credentials:
-            raise credentials_exception
-        token = credentials.credentials
-        payload = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
+        payload = jwt.decode(credentials.credentials, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
+        user_id = int(payload.get("sub"))
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token"
+            )
     except JWTError:
-        raise credentials_exception
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token"
+        )
+
+    user = db.query(models.User).filter(
+        and_(
+            models.User.id == user_id,
+            models.User.is_active == True,
+            models.User.is_deleted == False
+        )
+    ).first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Account is inactive or has been deleted"
+        )
         
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if user is None:
-        raise credentials_exception
     return user
 
 class TrainRequest(BaseModel):
@@ -396,9 +411,32 @@ async def add_user_stocks(
     Add stocks to user's watchlist.
     
     - **symbols**: List of stock symbols to add (e.g. ["AAPL", "GOOGL"])
+    - Maximum of 5 active stocks allowed per user
     
     Returns a list of added stocks with their status.
     """
+    # Check current number of enabled stocks for the user
+    current_stock_count = db.query(models.UserStock).filter(
+        models.UserStock.user_id == current_user.id,
+        models.UserStock.enabled == True
+    ).count()
+
+    # Calculate how many more stocks can be added
+    stocks_limit = 5
+    remaining_slots = stocks_limit - current_stock_count
+
+    if remaining_slots <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"You have reached the maximum limit of {stocks_limit} stocks. Please remove some stocks before adding new ones."
+        )
+
+    if len(request.symbols) > remaining_slots:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot add {len(request.symbols)} stocks. You can only add {remaining_slots} more stock(s) to reach the limit of {stocks_limit}."
+        )
+
     # First verify all stocks exist in available_stocks and are enabled
     available_stocks = db.query(models.AvailableStock).filter(
         models.AvailableStock.symbol.in_(request.symbols),
@@ -425,9 +463,16 @@ async def add_user_stocks(
         if existing_stock:
             # If exists but disabled, enable it
             if not existing_stock.enabled:
+                # Check limit again when enabling a disabled stock
+                if current_stock_count >= stocks_limit:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot enable more stocks. You have reached the limit of {stocks_limit} stocks."
+                    )
                 existing_stock.enabled = True
                 db.commit()
-                db.refresh(existing_stock)            
+                db.refresh(existing_stock)
+                current_stock_count += 1
             added_stocks.append(existing_stock)
             continue
             
@@ -437,6 +482,7 @@ async def add_user_stocks(
             symbol=symbol,
             enabled=True
         )
+        
         db.add(new_stock)
         db.commit()
         db.refresh(new_stock)
@@ -791,6 +837,50 @@ async def get_available_stocks(
     if enabled is not None:
         query = query.filter(models.AvailableStock.enabled == enabled)
     return query.order_by(models.AvailableStock.name).all()
+
+@app.delete("/users/me", status_code=204)
+async def delete_account(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Soft delete the current user's account.
+    This will:
+    1. Mark the account as deleted
+    2. Deactivate all stocks
+    3. Remove Telegram connections
+    4. Invalidate refresh tokens
+    """
+    try:
+        # Mark user as deleted
+        current_user.is_deleted = True
+        current_user.is_active = False
+        current_user.deleted_at = func.now()
+        
+        # Deactivate all user's stocks
+        db.query(models.UserStock).filter(
+            models.UserStock.user_id == current_user.id
+        ).update({"enabled": False})
+        
+        # Remove Telegram connections
+        db.query(models.UserTelegramConnection).filter(
+            models.UserTelegramConnection.user_id == current_user.id
+        ).update({"is_active": False})
+        
+        # Invalidate all refresh tokens
+        db.query(models.RefreshToken).filter(
+            models.RefreshToken.user_id == current_user.id
+        ).delete()
+        
+        db.commit()
+        return None
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete account"
+        )
 
 # Add routers to app
 app.include_router(auth_router)
