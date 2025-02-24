@@ -1,5 +1,5 @@
 from uuid import uuid4
-from fastapi import FastAPI, HTTPException, Security, Depends, APIRouter, status
+from fastapi import FastAPI, HTTPException, Security, Depends, APIRouter, status, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.models import OAuthFlows as OAuthFlowsModel
 from jose import JWTError, jwt
@@ -15,6 +15,7 @@ from telegram.ext import CallbackContext
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import and_, func
 from zoneinfo import ZoneInfo
+from .stripe_webhook import handle_stripe_webhook
 
 from .model import StockPredictor
 from .notifier import StockNotifier
@@ -1008,6 +1009,15 @@ app.include_router(auth_router)
 @auth_router.options("/google-login")
 async def google_login_options():
     return {}
+
+# Stripe webhook endpoint - no auth required
+@app.post("/stripe/webhook")
+async def stripe_webhook(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Handle Stripe webhook events"""
+    return await handle_stripe_webhook(request, db)
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 

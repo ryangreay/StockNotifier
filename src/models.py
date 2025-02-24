@@ -17,9 +17,19 @@ class User(Base):
     deleted_at = Column(DateTime(timezone=True), nullable=True)  # When the user was soft deleted
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_login = Column(DateTime(timezone=True), nullable=True)
+    
+    # Stripe related fields
+    stripe_customer_id = Column(String, unique=True, nullable=True)
+    stripe_subscription_id = Column(String, unique=True, nullable=True)
+    subscription_status = Column(String, nullable=True)  # active, canceled, past_due, etc.
+    subscription_end_date = Column(DateTime(timezone=True), nullable=True)
+    subscription_plan_id = Column(String, nullable=True)  # To track which plan they're on
 
     __table_args__ = (
         Index('idx_user_active_deleted', 'is_active', 'is_deleted'),
+        Index('idx_stripe_customer', 'stripe_customer_id'),
+        Index('idx_stripe_subscription', 'stripe_subscription_id'),
+        Index('idx_subscription_status', 'subscription_status'),
     )
 
 class AvailableStock(Base):
