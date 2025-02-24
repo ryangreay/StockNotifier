@@ -42,10 +42,10 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://stock-notifier.fly.dev"],  # Add both development and production URLs
+    allow_origins=["http://localhost:5173", "https://stock-notifier.fly.dev"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["*", "Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
     expose_headers=["*"],
     max_age=3600,  # Cache preflight requests for 1 hour
 )
@@ -1003,6 +1003,11 @@ async def delete_account(
 
 # Add routers to app
 app.include_router(auth_router)
+
+# Add explicit OPTIONS handler for the Google login endpoint
+@auth_router.options("/google-login")
+async def google_login_options():
+    return {}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 
