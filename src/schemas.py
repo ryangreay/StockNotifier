@@ -34,6 +34,23 @@ class Token(BaseModel):
     refresh_token: str
     token_type: str
 
+class ReactivateAccountRequest(BaseModel):
+    """Schema for account reactivation request."""
+    email: EmailStr
+    password: str  # For password-based accounts
+    google_token: Optional[str] = None  # For Google-based accounts
+
+class DeletedAccountResponse(BaseModel):
+    """Schema for checking deleted account status."""
+    email: str
+    deletion_date: datetime
+    can_reactivate: bool
+    reactivation_deadline: datetime
+    deletion_type: str  # "password" or "google"
+
+    class Config:
+        from_attributes = True
+
 class TokenData(BaseModel):
     """Schema for token payload data."""
     sub: Optional[str] = None

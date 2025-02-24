@@ -14,6 +14,7 @@ from telegram import Bot, Update
 from telegram.ext import CallbackContext
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import and_, func
+from zoneinfo import ZoneInfo
 
 from .model import StockPredictor
 from .notifier import StockNotifier
@@ -802,6 +803,122 @@ async def refresh_token(
         
     except JWTError:
         raise HTTPException(status_code=400, detail="Invalid refresh token")
+
+@auth_router.get("/check-deleted-account/{email}", response_model=schemas.DeletedAccountResponse)
+async def check_deleted_account(email: str, db: Session = Depends(get_db)):
+    """
+    Check if a deleted account exists and can be reactivated.
+    
+    - **email**: Email address of the deleted account
+    
+    Returns information about the deleted account including reactivation deadline.
+    """
+    # Find the deleted user
+    user = db.query(models.User).filter(
+        models.User.email == email,
+        models.User.is_deleted == True
+    ).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found")
+    
+    # Calculate reactivation deadline (30 days from deletion)
+    reactivation_deadline = user.deleted_at + timedelta(days=30)
+    # Use UTC for comparison
+    now = datetime.now(ZoneInfo("UTC"))
+    can_reactivate = now < reactivation_deadline
+    
+    return {
+        "email": user.email,
+        "deletion_date": user.deleted_at,
+        "can_reactivate": can_reactivate,
+        "reactivation_deadline": reactivation_deadline,
+        "deletion_type": "google" if user.google_id else "password"
+    }
+
+@auth_router.post("/reactivate", response_model=schemas.Token)
+async def reactivate_account(
+    reactivation: schemas.ReactivateAccountRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Reactivate a deleted account.
+    
+    - **email**: Email address of the account
+    - **password**: Password (for password-based accounts)
+    - **google_token**: Google OAuth token (for Google-based accounts)
+    
+    Returns new access and refresh tokens if successful.
+    """
+    # Find the deleted user
+    user = db.query(models.User).filter(
+        models.User.email == reactivation.email,
+        models.User.is_deleted == True
+    ).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found")
+    
+    # Check if within reactivation window
+    reactivation_deadline = user.deleted_at + timedelta(days=30)
+    now = datetime.now(ZoneInfo("UTC"))
+    if now > reactivation_deadline:
+        raise HTTPException(
+            status_code=400,
+            detail="Reactivation period has expired. Please create a new account."
+        )
+    
+    # Verify credentials
+    if user.google_id:
+        if not reactivation.google_token:
+            raise HTTPException(
+                status_code=400,
+                detail="This account was created with Google. Please use Google sign-in to reactivate."
+            )
+        # Verify Google token
+        google_data = await auth.verify_google_token(reactivation.google_token)
+        if google_data['sub'] != user.google_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Google account"
+            )
+    else:
+        if not reactivation.password:
+            raise HTTPException(
+                status_code=400,
+                detail="Password is required for reactivation"
+            )
+        if not auth.verify_password(reactivation.password, user.hashed_password):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid password"
+            )
+    
+    # Reactivate the account
+    user.is_deleted = False
+    user.is_active = True
+    user.deleted_at = None
+    user.last_login = datetime.utcnow()
+    
+    # Reactivate user settings and stocks if they exist
+    db.query(models.UserStock).filter(
+        models.UserStock.user_id == user.id
+    ).update({"enabled": True})
+    
+    db.commit()
+    
+    # Create new tokens
+    access_token = auth.create_access_token(
+        data={"sub": str(user.id)},
+        expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    refresh_token = auth.create_refresh_token(user.id, db)
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
 
 @app.get("/telegram-status")
 async def get_telegram_status(
