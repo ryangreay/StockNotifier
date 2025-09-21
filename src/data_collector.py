@@ -347,11 +347,19 @@ def calculate_technical_indicators(df):
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    # MACD Histogram and z-score normalization to reduce price correlation
+    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+    macd_hist_mean = df['MACD_Hist'].rolling(window=60, min_periods=1).mean()
+    macd_hist_std = df['MACD_Hist'].rolling(window=60, min_periods=1).std()
+    df['MACD_Hist_Z'] = (df['MACD_Hist'] - macd_hist_mean) / macd_hist_std
     
     # Bollinger Bands
     std = df['Close'].rolling(window=20).std()
     df['Upper_Band'] = df['MA_20'] + (std * 2)
     df['Lower_Band'] = df['MA_20'] - (std * 2)
+    # Bollinger %B indicator
+    bb_width = (df['Upper_Band'] - df['Lower_Band'])
+    df['PercentB'] = (df['Close'] - df['Lower_Band']) / bb_width
     
     return df
 

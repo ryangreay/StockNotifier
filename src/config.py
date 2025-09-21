@@ -30,9 +30,9 @@ LOCAL_MODEL_PATH = '/tmp/stock_predictor.joblib'  # Temporary local storage
 
 # Model Configuration
 FEATURE_COLUMNS = [
-    'Open', 'High', 'Low', 'Close', 'Volume',
-    'MA_5', 'MA_20', 'RSI', 'MACD', 'MACD_Signal',
-    'Upper_Band', 'Lower_Band'
+    #'Open', 'High', 'Low', 'Close', 'MA_5', 'MA_20', 
+    'Volume',
+    'RSI', 'MACD_Hist_Z', 'PercentB'
 ]
 
 # Trading Configuration

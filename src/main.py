@@ -34,16 +34,19 @@ app = FastAPI(
     title=API_TITLE,
     description=API_DESCRIPTION,
     version=API_VERSION,
-    swagger_ui_init_oauth={
-        "usePkceWithAuthorizationCodeGrant": True,
-    },
-    swagger_ui_parameters={"persistAuthorization": True}
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://stock-notifier.fly.dev"],
+    allow_origins=[
+        "http://localhost:5173",  # Local development
+        "http://localhost:3000",  # Alternative local development
+        "https://stock-notifier.fly.dev",  # Production frontend
+        "https://stocknudger.com",  # Production domain
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*", "Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
@@ -142,6 +145,22 @@ class PredictionResponse(BaseModel):
     current_price: float
     notification_sent: Optional[bool] = None
     notification_error: Optional[str] = None
+
+class TuneRequest(BaseModel):
+    symbol: str
+    n_iter: Optional[int] = 20
+    cv: Optional[int] = 5
+    scoring: Optional[str] = 'roc_auc'
+    test_size: Optional[float] = 0.2
+
+class TuneResponse(BaseModel):
+    status: str
+    message: str
+    symbol: str
+    tuning: dict
+    holdout_performance: dict
+    stock_performance: dict
+    training_info: dict
 
 class TelegramConnectRequest(BaseModel):
     connection_token: str
@@ -253,6 +272,53 @@ async def train_model(
             detail=f"Error training model: {str(e)}"
         )
 
+@app.post("/tune", response_model=TuneResponse)
+async def tune_model(
+    request: TuneRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Tune RF hyperparameters for a stock symbol using randomized search with K-fold CV.
+    Saves the best model and returns tuning and evaluation metrics.
+    """
+    try:
+        # Verify user has an active subscription for this symbol
+        stock_sub = db.query(models.UserStock).filter(
+            models.UserStock.user_id == current_user.id,
+            models.UserStock.symbol == request.symbol,
+            models.UserStock.enabled == True
+        ).first()
+
+        if not stock_sub:
+            raise HTTPException(
+                status_code=404,
+                detail="No active subscription found for this stock"
+            )
+
+        result = predictor.tune_hyperparameters(
+            user_id=current_user.id,
+            symbol=request.symbol,
+            n_iter=request.n_iter,
+            cv=request.cv,
+            scoring=request.scoring,
+            test_size=request.test_size,
+            db=db
+        )
+
+        return {
+            'status': 'success',
+            'message': f"Tuning completed for {request.symbol}",
+            'symbol': request.symbol,
+            **result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error tuning model: {str(e)}"
+        )
+
 @app.post("/untrain")
 async def untrain_model(
     request: UntrainRequest,
@@ -278,13 +344,13 @@ async def untrain_model(
             
         predictor.untrain(current_user.id, request.symbols)
         
-        # Get updated trained symbols for this user
-        _, trained_symbols = predictor.get_user_model(current_user.id)
+        # Get updated trained symbols for this user (symbols with models)
+        remaining_symbols = predictor.list_user_symbols(current_user.id)
         
         return {
             "status": "success", 
             "message": f"Symbols removed from training: {', '.join(request.symbols)}",
-            "remaining_symbols": sorted(list(trained_symbols))
+            "remaining_symbols": remaining_symbols
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
