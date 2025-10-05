@@ -4,17 +4,17 @@ An ML-driven application that predicts significant stock price movements and sen
 
 ## Project Overview
 
-The purpose of this project is to evaluate the effectiveness of using technical indicators as a predictive measure for a stock's future price. Additionally, it is an exercise in building a scalable software system which incorporates user customization and stock notifications. To accomplish these things we use a Random Forest classifier based on indicators such as RSI, bolling bands, MACD, and Volume. Instead of a typical regression task predicting a specific stock price, we are trying a binary classifier to predict a percentage movement over a user defined timeframe. For example, the user set a notification if with 90% certainty, a stock will move 3% in the 24 hours when trained on a daily or hourly timeframe. We employ a variety of technologies to make and push out predictions to users, such as Google Cloud Storage, Alpha Vantage APIs, Redis for caching stock data and pub/sub with notifications, AWS Lambda for triggering prediction notifications, telegram APIs for notifications themselves, and fly.io for quick microservice deployment.
+The purpose of this project is to evaluate the effectiveness of using technical indicators as a predictive measure for a stock's future price. Additionally, it is an exercise in building a scalable software system which incorporates user customization and stock notifications. To accomplish these things I use a Random Forest classifier based on indicators such as RSI, bolling bands, MACD, and Volume. Instead of a typical regression task predicting a specific stock price, I am trying a binary classifier to predict a percentage movement over a user defined timeframe. For example, the user set a notification if with 90% certainty, a stock will move 3% in the 24 hours when trained on a daily or hourly timeframe. I employ a variety of technologies to make and push out predictions to users, such as Google Cloud Storage, Alpha Vantage APIs, Redis for caching stock data and pub/sub with notifications, AWS Lambda for triggering prediction notifications, telegram APIs for notifications themselves, and fly.io for quick microservice deployment.
 
 ## Feature Selection, Data, and Model
 
-A big problem when training stock data is that the range of values for a technical indicator like bollinger bands or MACD greatly differs depending on the price so training multiple stocks into the same model or over many years may not be effective. To attempt to alleviate this, we use one model per stock for a user, and on the technical indicator side for bollinger bands we are going to calculate %b to reduce price dependency.
+A big problem when training stock data is that the range of values for a technical indicator like bollinger bands or MACD greatly differs depending on the price so training multiple stocks into the same model or over many years may not be effective. To attempt to alleviate this, I use one model per stock for a user, and on the technical indicator side for bollinger bands I am going to calculate %b to reduce price dependency.
 $$
 
 \%B = \frac{\text{Current Price} - \text{Lower Band}}{\text{Upper Band} - \text{Lower Band}}
 
 $$
-For MACD we are doing the MAACD Histogram which factors the signal.
+For MACD, I am doing the MAACD Histogram which factors the signal.
 $$
 \text{MACD Line} = \text{EMA}_{12} - \text{EMA}_{26}
 $$
@@ -24,11 +24,11 @@ $$
 $$
 \text{MACD Histogram} = \text{MACD Line} - \text{Signal Line}
 $$
-RSI is already a decent predictor of overbought/oversold conditions with values ranging from 0 to 100. Finally we will use volume. These features should provide good numbers for thresholding that occurs in the decision trees that are ensembled in Random Forests. For model selection we will use a Random Forest Classifier and fine tune the `n_estimators`, `max_depth`, and `max_features` hyperparameters with  Random Search in an attempt to get the most out of the model. Another problem we have with a lot of stocks is a very imbalanced data set with a large portion of the data being the positive movement class for small percentage thresholds and vice versa for large percentage thresholds. For example, a 4% movement over a 12 hour period will be very rare. An example of this, Tesla over a 15 year period is 88%/12% for movement above the 3% threshold. To counter this, proper stock threshold configurations is important for maximizing potential gains, and we will consider using SMOTE to artificailly generate the less frequent class. Additionally, stratified sampling may be useful. In reality, the `/tune` endpoint does not use SMOTE, but does use stratified sampling with `RandomizedSearchCV` and we find decent performance.
+RSI is already a decent predictor of overbought/oversold conditions with values ranging from 0 to 100. Finally, I will use volume. These features should provide good numbers for thresholding that occurs in the decision trees that are ensembled in Random Forests. For model selection I will use a Random Forest Classifier and fine tune the `n_estimators`, `max_depth`, and `max_features` hyperparameters with  Random Search in an attempt to get the most out of the model. Another problem I have with a lot of stocks is a very imbalanced data set with a large portion of the data being the positive movement class for small percentage thresholds and vice versa for large percentage thresholds. For example, a 4% movement over a 12 hour period will be very rare. An example of this, Tesla over a 15 year period is 88%/12% for movement above the 3% threshold. To counter this, proper stock threshold configurations is important for maximizing potential gains, and I will consider using SMOTE to artificailly generate the less frequent class. Additionally, stratified sampling may be useful. In reality, the `/tune` endpoint does not use SMOTE, but does use stratified sampling with `RandomizedSearchCV` and I find decent performance.
 
 ## Model Performance
 
-The main training and performance evaluation happens in the `/tune` endpoint. We use `RandomizedSearchCV` to fine tune the RF hyperparameters and found that these values below generally give us the best performance with some variance depending on the stock:
+The main training and performance evaluation happens in the `/tune` endpoint. I use `RandomizedSearchCV` to fine tune the RF hyperparameters and found that these values below generally give us the best performance with some variance depending on the stock:
 
 | n_estimators   | max_features  | max_depth  |
 |------------|------------|------------|
@@ -97,21 +97,25 @@ For the cross validation I use 5 folds and a 80/20 split for the final holdout s
 
 ### User/Model/Prediction service
 
-The meat of the functionality exists in this service hosted at https://stock-notifier-api.fly.dev/docs. The user endpoints could be placed on its own service to reduce any potential tie up with model predictions and frontend user operations. This would be a task if the project ever saw real user load. With the model data, we are pulling stock prices from Alpha Vantage and Redis caching these prices until it is made stale by th etimeframe it is trained on. For example, if it is hourly data, we invalidate it after an hour since fresher data is available. Overall, this massively reduces API calls when doing mass predictions and reduces chances of hitting rate limits. Additionally, we are storing user models in local storage as long as there is available space, which reduces the amount of network load when doing mass predictions and loading/saving models stored in GCS.
+The meat of the functionality exists in this service hosted at https://stock-notifier-api.fly.dev/docs. The user endpoints could be placed on its own service to reduce any potential tie up with model predictions and frontend user operations. This would be a task if the project ever saw real user load. With the model data, I am pulling stock prices from Alpha Vantage and Redis caching these prices until it is made stale by th etimeframe it is trained on. For example, if it is hourly data, I invalidate it after an hour since fresher data is available. Overall, this massively reduces API calls when doing mass predictions and reduces chances of hitting rate limits. Additionally, I am storing user models in local storage as long as there is available space, which reduces the amount of network load when doing mass predictions and loading/saving models stored in GCS.
 
 ### Notification Service
 
-We are using Lambda to trigger notifications on a schedule. This works by querying all the users who have notifications enabled at the current time, puts them in a queue (Redis pub/sub), then multiple worker services pick them up, make the predictions and send the telegram message via Telegram's APIs. Additionally, we have a bot service that allows users to link their telegram accounts to their user accounts for this project.
+I am using Eventbridge and Lambda to trigger notifications on a schedule. For example, the Eventbridge cron for market open is `cron(30 13 ? * MON-FRI *)`. This works by querying all the users who have notifications enabled at the current time, puts them in a queue (Redis pub/sub), then multiple worker services pick them up, make the predictions and send the telegram message via Telegram's APIs. Additionally, I have a bot service that allows users to link their telegram accounts to their user accounts for this project. Users set a prediction confidence, say 90%, and if the prediction confidence lies above that threshold they get notified, otherwise it passes. 
 
 ## Future Improvement
 
 ### Sentiment Analysis
 
-The results of the project show that technical indicators alone may boost odds greater than random chance, but its not necessarily a fully trustworthy option. It may be helpful to include sentiment analysis on a stock, assign a sentiment score, and include as another feature. For historical sentiment training we would likely need to use a third party that saves this data, but if we want to include it in up to date predictions and notifications this may involve scraping or paying for news feeds to vectorize and determine a postive, negative, neutral, or integer range score (for purposes of a random forest). This would require frequent polling and model retraining as news happens fast and sentiment can change on a dime.
+The results of the project show that technical indicators alone may boost odds greater than random chance, but its not necessarily a fully trustworthy option. It may be helpful to include sentiment analysis on a stock, assign a sentiment score, and include as another feature. For historical sentiment training I would likely need to use a third party that saves this data, but if I want to include it in up to date predictions and notifications this may involve scraping or paying for news feeds to vectorize and determine a postive, negative, neutral, or integer range score (for purposes of a random forest). This would require frequent polling and model retraining as news happens fast and sentiment can change on a dime.
 
 ### Vertex AI
 
-We are already using GCP for storing models so it would make sense to use vertex for the prediction service. Batch predictions with vertex would likely simplify the notifications at scale and remove the complexity/bottleneck of the fly.io model predictor service. Better model versioning, while it does not necessarily fit into this project concept may be an option here also.
+I am already using GCP for storing models so it would make sense to use vertex for the prediction service. Batch predictions with vertex would likely simplify the notifications at scale and remove the complexity/bottleneck of the fly.io model predictor service. Better model versioning, while it does not necessarily fit into this project concept may be an option here also.
+
+### Model Retraining
+
+Stock data is constantly updating so user models should be frequently re-trained. A good starting point may be to use a weekly cron job to train a new model, compare the results to the current user's model, and if there is an improvement, replace it. Since Random Forest training and inference with the stock data available is very fast, this task would not be too much of a burden.
 
 ### Frontend
 
