@@ -1,5 +1,5 @@
 from uuid import uuid4
-from fastapi import FastAPI, HTTPException, Security, Depends, APIRouter, status
+from fastapi import FastAPI, HTTPException, Security, Depends, APIRouter, status, Request
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.models import OAuthFlows as OAuthFlowsModel
 from jose import JWTError, jwt
@@ -13,6 +13,9 @@ from .database import get_db
 from telegram import Bot, Update
 from telegram.ext import CallbackContext
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import and_, func
+from zoneinfo import ZoneInfo
+from .stripe_webhook import handle_stripe_webhook
 
 from .model import StockPredictor
 from .notifier import StockNotifier
@@ -31,19 +34,24 @@ app = FastAPI(
     title=API_TITLE,
     description=API_DESCRIPTION,
     version=API_VERSION,
-    swagger_ui_init_oauth={
-        "usePkceWithAuthorizationCodeGrant": True,
-    },
-    swagger_ui_parameters={"persistAuthorization": True}
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Add your frontend URL
+    allow_origins=[
+        "http://localhost:5173",  # Local development
+        "http://localhost:3000",  # Alternative local development
+        "https://stock-notifier.fly.dev",  # Production frontend
+        "https://stocknudger.com",  # Production domain
+    ],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["*", "Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
+    expose_headers=["*"],
+    max_age=3600,  # Cache preflight requests for 1 hour
 )
 
 # Security schemes for Swagger UI
@@ -71,6 +79,10 @@ auth_router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+# Create routers
+stocks_router = APIRouter(prefix="/stocks", tags=["stocks"])
+user_stocks_router = APIRouter(prefix="/users/stocks", tags=["user stocks"])
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
     db: Session = Depends(get_db)
@@ -81,19 +93,33 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        if not credentials:
-            raise credentials_exception
-        token = credentials.credentials
-        payload = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
+        payload = jwt.decode(credentials.credentials, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
+        user_id = int(payload.get("sub"))
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token"
+            )
     except JWTError:
-        raise credentials_exception
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token"
+        )
+
+    user = db.query(models.User).filter(
+        and_(
+            models.User.id == user_id,
+            models.User.is_active == True,
+            models.User.is_deleted == False
+        )
+    ).first()
+    
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Account is inactive or has been deleted"
+        )
         
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if user is None:
-        raise credentials_exception
     return user
 
 class TrainRequest(BaseModel):
@@ -119,6 +145,22 @@ class PredictionResponse(BaseModel):
     current_price: float
     notification_sent: Optional[bool] = None
     notification_error: Optional[str] = None
+
+class TuneRequest(BaseModel):
+    symbol: str
+    n_iter: Optional[int] = 20
+    cv: Optional[int] = 3
+    scoring: Optional[str] = 'roc_auc'
+    test_size: Optional[float] = 0.2
+
+class TuneResponse(BaseModel):
+    status: str
+    message: str
+    symbol: str
+    tuning: dict
+    holdout_performance: dict
+    stock_performance: dict
+    training_info: dict
 
 class TelegramConnectRequest(BaseModel):
     connection_token: str
@@ -193,7 +235,7 @@ async def train_model(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Train the model on historical data for a given stock symbol."""
+    """Train model for a stock symbol."""
     try:
         # Verify user has an active subscription for this symbol
         stock_sub = db.query(models.UserStock).filter(
@@ -207,11 +249,75 @@ async def train_model(
                 status_code=404,
                 detail="No active subscription found for this stock"
             )
-            
-        predictor.train(current_user.id, request.symbol, request.test_size, db=db)
-        return {"status": "success", "message": f"Model trained successfully for {request.symbol}"}
+        
+        # Train the model
+        metrics = predictor.train(
+            user_id=current_user.id,
+            symbols=[request.symbol],
+            test_size=request.test_size,
+            db=db
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Model trained successfully for {request.symbol}",
+            "metrics": metrics,
+            "symbol": request.symbol,
+            "test_size": request.test_size
+        }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error training model: {str(e)}"
+        )
+
+@app.post("/tune", response_model=TuneResponse)
+async def tune_model(
+    request: TuneRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Tune RF hyperparameters for a stock symbol using randomized search with K-fold CV.
+    Saves the best model and returns tuning and evaluation metrics.
+    """
+    try:
+        # Verify user has an active subscription for this symbol
+        stock_sub = db.query(models.UserStock).filter(
+            models.UserStock.user_id == current_user.id,
+            models.UserStock.symbol == request.symbol,
+            models.UserStock.enabled == True
+        ).first()
+
+        if not stock_sub:
+            raise HTTPException(
+                status_code=404,
+                detail="No active subscription found for this stock"
+            )
+
+        result = predictor.tune_hyperparameters(
+            user_id=current_user.id,
+            symbol=request.symbol,
+            n_iter=request.n_iter,
+            cv=request.cv,
+            scoring=request.scoring,
+            test_size=request.test_size,
+            db=db
+        )
+
+        return {
+            'status': 'success',
+            'message': f"Tuning completed for {request.symbol}",
+            'symbol': request.symbol,
+            **result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error tuning model: {str(e)}"
+        )
 
 @app.post("/untrain")
 async def untrain_model(
@@ -238,13 +344,13 @@ async def untrain_model(
             
         predictor.untrain(current_user.id, request.symbols)
         
-        # Get updated trained symbols for this user
-        _, trained_symbols = predictor.get_user_model(current_user.id)
+        # Get updated trained symbols for this user (symbols with models)
+        remaining_symbols = predictor.list_user_symbols(current_user.id)
         
         return {
             "status": "success", 
             "message": f"Symbols removed from training: {', '.join(request.symbols)}",
-            "remaining_symbols": sorted(list(trained_symbols))
+            "remaining_symbols": remaining_symbols
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -365,7 +471,7 @@ async def health_check_auth(current_user: models.User = Depends(get_current_user
         }
     }
 
-@app.post("/stocks", response_model=List[schemas.UserStockResponse])
+@app.post("/users/stocks", response_model=List[schemas.UserStockResponse])
 async def add_user_stocks(
     request: schemas.UserStockCreate,
     current_user: models.User = Depends(get_current_user),
@@ -375,11 +481,48 @@ async def add_user_stocks(
     Add stocks to user's watchlist.
     
     - **symbols**: List of stock symbols to add (e.g. ["AAPL", "GOOGL"])
+    - Maximum of 5 active stocks allowed per user
     
     Returns a list of added stocks with their status.
     """
-    added_stocks = []
+    # Check current number of enabled stocks for the user
+    current_stock_count = db.query(models.UserStock).filter(
+        models.UserStock.user_id == current_user.id,
+        models.UserStock.enabled == True
+    ).count()
+
+    # Calculate how many more stocks can be added
+    stocks_limit = 5
+    remaining_slots = stocks_limit - current_stock_count
+
+    if remaining_slots <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"You have reached the maximum limit of {stocks_limit} stocks. Please remove some stocks before adding new ones."
+        )
+
+    if len(request.symbols) > remaining_slots:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot add {len(request.symbols)} stocks. You can only add {remaining_slots} more stock(s) to reach the limit of {stocks_limit}."
+        )
+
+    # First verify all stocks exist in available_stocks and are enabled
+    available_stocks = db.query(models.AvailableStock).filter(
+        models.AvailableStock.symbol.in_(request.symbols),
+        models.AvailableStock.enabled == True
+    ).all()
     
+    # Check if any symbols are not available or not enabled
+    available_symbols = {stock.symbol for stock in available_stocks}
+    invalid_symbols = set(request.symbols) - available_symbols
+    if invalid_symbols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The following symbols are not available or not enabled: {', '.join(invalid_symbols)}"
+        )
+    
+    added_stocks = []
     for symbol in request.symbols:
         # Check if stock already exists for user
         existing_stock = db.query(models.UserStock).filter(
@@ -390,9 +533,16 @@ async def add_user_stocks(
         if existing_stock:
             # If exists but disabled, enable it
             if not existing_stock.enabled:
+                # Check limit again when enabling a disabled stock
+                if current_stock_count >= stocks_limit:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot enable more stocks. You have reached the limit of {stocks_limit} stocks."
+                    )
                 existing_stock.enabled = True
                 db.commit()
-                db.refresh(existing_stock)            
+                db.refresh(existing_stock)
+                current_stock_count += 1
             added_stocks.append(existing_stock)
             continue
             
@@ -402,6 +552,7 @@ async def add_user_stocks(
             symbol=symbol,
             enabled=True
         )
+        
         db.add(new_stock)
         db.commit()
         db.refresh(new_stock)
@@ -409,7 +560,7 @@ async def add_user_stocks(
     
     return added_stocks
 
-@app.get("/stocks", response_model=List[schemas.UserStockResponse])
+@app.get("/users/stocks", response_model=List[schemas.UserStockResponse])
 async def get_user_stocks(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -426,7 +577,7 @@ async def get_user_stocks(
     
     return stocks
 
-@app.delete("/stocks", response_model=List[schemas.UserStockResponse])
+@app.delete("/users/stocks", response_model=List[schemas.UserStockResponse])
 async def remove_user_stocks(
     request: schemas.UserStockRemove,
     current_user: models.User = Depends(get_current_user),
@@ -464,7 +615,7 @@ async def remove_user_stocks(
     
     return removed_stocks
 
-@app.put("/settings", response_model=schemas.UserSettings)
+@app.put("/users/settings", response_model=schemas.UserSettings)
 async def update_user_settings(
     settings: schemas.UserSettings,
     current_user: models.User = Depends(get_current_user),
@@ -503,7 +654,7 @@ async def update_user_settings(
     
     return user_settings
 
-@app.get("/settings", response_model=schemas.UserSettings)
+@app.get("/users/settings", response_model=schemas.UserSettings)
 async def get_user_settings(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -617,17 +768,52 @@ async def google_login(
     """
     google_data = await auth.verify_google_token(token_data.token)
     
-    # Find or create user
-    user = db.query(models.User).filter(models.User.email == google_data['email']).first()
+    # First try to find user by google_id (most reliable method)
+    user = db.query(models.User).filter(
+        models.User.google_id == google_data['sub']
+    ).first()
+    
     if not user:
-        user = models.User(
-            email=google_data['email'],
-            full_name=google_data['name'],
-            google_id=google_data['sub']
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+        # If no user found by google_id, check email
+        existing_user = db.query(models.User).filter(
+            models.User.email == google_data['email']
+        ).first()
+        
+        if existing_user:
+            if existing_user.hashed_password:
+                # User exists with password (email signup) - don't allow Google login
+                raise HTTPException(
+                    status_code=400,
+                    detail="Email already registered with password. Please use email login."
+                )
+            elif existing_user.google_id and existing_user.google_id != google_data['sub']:
+                # User exists with different Google account
+                raise HTTPException(
+                    status_code=400,
+                    detail="Email already registered with different Google account."
+                )
+            else:
+                # Update existing user with google_id if missing
+                existing_user.google_id = google_data['sub']
+                user = existing_user
+        else:
+            # Create new user
+            user = models.User(
+                email=google_data['email'],
+                full_name=google_data['name'],
+                google_id=google_data['sub'],
+                hashed_password=None  # Explicitly set None for Google users
+            )
+            db.add(user)
+    
+    # Update user info if needed
+    if user.full_name != google_data['name']:
+        user.full_name = google_data['name']
+    
+    # Update last login
+    user.last_login = datetime.utcnow()
+    db.commit()
+    db.refresh(user)
     
     # Create tokens
     access_token = auth.create_access_token(
@@ -635,10 +821,6 @@ async def google_login(
         expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     refresh_token = auth.create_refresh_token(user.id, db)
-    
-    # Update last login
-    user.last_login = datetime.utcnow()
-    db.commit()
     
     return {
         "access_token": access_token,
@@ -691,6 +873,122 @@ async def refresh_token(
     except JWTError:
         raise HTTPException(status_code=400, detail="Invalid refresh token")
 
+@auth_router.get("/check-deleted-account/{email}", response_model=schemas.DeletedAccountResponse)
+async def check_deleted_account(email: str, db: Session = Depends(get_db)):
+    """
+    Check if a deleted account exists and can be reactivated.
+    
+    - **email**: Email address of the deleted account
+    
+    Returns information about the deleted account including reactivation deadline.
+    """
+    # Find the deleted user
+    user = db.query(models.User).filter(
+        models.User.email == email,
+        models.User.is_deleted == True
+    ).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found")
+    
+    # Calculate reactivation deadline (30 days from deletion)
+    reactivation_deadline = user.deleted_at + timedelta(days=30)
+    # Use UTC for comparison
+    now = datetime.now(ZoneInfo("UTC"))
+    can_reactivate = now < reactivation_deadline
+    
+    return {
+        "email": user.email,
+        "deletion_date": user.deleted_at,
+        "can_reactivate": can_reactivate,
+        "reactivation_deadline": reactivation_deadline,
+        "deletion_type": "google" if user.google_id else "password"
+    }
+
+@auth_router.post("/reactivate", response_model=schemas.Token)
+async def reactivate_account(
+    reactivation: schemas.ReactivateAccountRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Reactivate a deleted account.
+    
+    - **email**: Email address of the account
+    - **password**: Password (for password-based accounts)
+    - **google_token**: Google OAuth token (for Google-based accounts)
+    
+    Returns new access and refresh tokens if successful.
+    """
+    # Find the deleted user
+    user = db.query(models.User).filter(
+        models.User.email == reactivation.email,
+        models.User.is_deleted == True
+    ).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found")
+    
+    # Check if within reactivation window
+    reactivation_deadline = user.deleted_at + timedelta(days=30)
+    now = datetime.now(ZoneInfo("UTC"))
+    if now > reactivation_deadline:
+        raise HTTPException(
+            status_code=400,
+            detail="Reactivation period has expired. Please create a new account."
+        )
+    
+    # Verify credentials
+    if user.google_id:
+        if not reactivation.google_token:
+            raise HTTPException(
+                status_code=400,
+                detail="This account was created with Google. Please use Google sign-in to reactivate."
+            )
+        # Verify Google token
+        google_data = await auth.verify_google_token(reactivation.google_token)
+        if google_data['sub'] != user.google_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Google account"
+            )
+    else:
+        if not reactivation.password:
+            raise HTTPException(
+                status_code=400,
+                detail="Password is required for reactivation"
+            )
+        if not auth.verify_password(reactivation.password, user.hashed_password):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid password"
+            )
+    
+    # Reactivate the account
+    user.is_deleted = False
+    user.is_active = True
+    user.deleted_at = None
+    user.last_login = datetime.utcnow()
+    
+    # Reactivate user settings and stocks if they exist
+    db.query(models.UserStock).filter(
+        models.UserStock.user_id == user.id
+    ).update({"enabled": True})
+    
+    db.commit()
+    
+    # Create new tokens
+    access_token = auth.create_access_token(
+        data={"sub": str(user.id)},
+        expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    refresh_token = auth.create_refresh_token(user.id, db)
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
+
 @app.get("/telegram-status")
 async def get_telegram_status(
     current_user: models.User = Depends(get_current_user),
@@ -707,8 +1005,85 @@ async def get_telegram_status(
         "connected_at": telegram_conn.connected_at if telegram_conn else None
     }
 
-# Include the auth router in the main app
+@app.get("/stocks", response_model=List[schemas.AvailableStockResponse])
+async def get_available_stocks(
+    enabled: Optional[bool] = None,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get list of available stocks.
+    
+    Parameters:
+    - **enabled**: Optional filter for enabled/disabled stocks
+    
+    Returns list of stocks with their symbols, names, and enabled status.
+    """
+    query = db.query(models.AvailableStock)
+    if enabled is not None:
+        query = query.filter(models.AvailableStock.enabled == enabled)
+    return query.order_by(models.AvailableStock.name).all()
+
+@app.delete("/users/me", status_code=204)
+async def delete_account(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Soft delete the current user's account.
+    This will:
+    1. Mark the account as deleted
+    2. Deactivate all stocks
+    3. Remove Telegram connections
+    4. Invalidate refresh tokens
+    """
+    try:
+        # Mark user as deleted
+        current_user.is_deleted = True
+        current_user.is_active = False
+        current_user.deleted_at = func.now()
+        
+        # Deactivate all user's stocks
+        db.query(models.UserStock).filter(
+            models.UserStock.user_id == current_user.id
+        ).update({"enabled": False})
+        
+        # Remove Telegram connections
+        db.query(models.UserTelegramConnection).filter(
+            models.UserTelegramConnection.user_id == current_user.id
+        ).update({"is_active": False})
+        
+        # Invalidate all refresh tokens
+        db.query(models.RefreshToken).filter(
+            models.RefreshToken.user_id == current_user.id
+        ).delete()
+        
+        db.commit()
+        return None
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete account"
+        )
+
+# Add routers to app
 app.include_router(auth_router)
+
+# Add explicit OPTIONS handler for the Google login endpoint
+@auth_router.options("/google-login")
+async def google_login_options():
+    return {}
+
+# Stripe webhook endpoint - no auth required
+@app.post("/stripe/webhook")
+async def stripe_webhook(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Handle Stripe webhook events"""
+    return await handle_stripe_webhook(request, db)
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True) 

@@ -59,14 +59,31 @@ def create_refresh_token(user_id: int, db: Session) -> str:
 
 async def verify_google_token(token: str) -> dict:
     try:
+        # Create a Request object with proper headers
+        request = requests.Request()
+        
+        # Verify the token
         idinfo = id_token.verify_oauth2_token(
-            token, requests.Request(), GOOGLE_CLIENT_ID
+            token, request, GOOGLE_CLIENT_ID,
+            clock_skew_in_seconds=10  # Allow for small time differences
         )
+        
+        # Verify issuer
+        if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
+            raise ValueError('Wrong issuer.')
+            
         return idinfo
-    except Exception as e:
+    except ValueError as e:
+        # Handle specific verification errors
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Google token"
+            detail=f"Invalid Google token: {str(e)}"
+        )
+    except Exception as e:
+        # Handle unexpected errors
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Failed to verify Google token"
         )
 
 async def get_current_user(

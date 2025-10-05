@@ -22,5 +22,6 @@ google-auth-oauthlib>=1.0.0      # For Google OAuth
 aiohttp>=3.8.5                   # For async HTTP requests
 sqlalchemy>=1.4.41              # For database ORM
 psycopg2-binary>=2.9.7          # PostgreSQL adapter
-redis>=5.0.1                    # For Redis pub/sub
+redis>=5.0.1                    # For Redis caching
 boto3>=1.34.0                   # For AWS services
+stripe>=7.0.0                   # For Stripe integration

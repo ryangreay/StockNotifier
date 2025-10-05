@@ -13,8 +13,40 @@ class User(Base):
     full_name = Column(String)
     google_id = Column(String, unique=True, nullable=True)
     is_active = Column(Boolean, default=True)
+    is_deleted = Column(Boolean, default=False)  # For soft deletion
+    deleted_at = Column(DateTime(timezone=True), nullable=True)  # When the user was soft deleted
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_login = Column(DateTime(timezone=True), nullable=True)
+    
+    # Stripe related fields
+    stripe_customer_id = Column(String, unique=True, nullable=True)
+    stripe_subscription_id = Column(String, unique=True, nullable=True)
+    subscription_status = Column(String, nullable=True)  # active, canceled, past_due, etc.
+    subscription_end_date = Column(DateTime(timezone=True), nullable=True)
+    subscription_plan_id = Column(String, nullable=True)  # To track which plan they're on
+
+    __table_args__ = (
+        Index('idx_user_active_deleted', 'is_active', 'is_deleted'),
+        Index('idx_stripe_customer', 'stripe_customer_id'),
+        Index('idx_stripe_subscription', 'stripe_subscription_id'),
+        Index('idx_subscription_status', 'subscription_status'),
+    )
+
+class AvailableStock(Base):
+    """Available stocks that can be tracked in the app."""
+    __tablename__ = "available_stocks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(10), unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        Index('idx_available_stocks_enabled', 'enabled'),
+        Index('idx_available_stocks_symbol', 'symbol'),
+    )
 
 class UserSettings(Base):
     """User settings model."""
