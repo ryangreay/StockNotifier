@@ -149,7 +149,7 @@ class PredictionResponse(BaseModel):
 class TuneRequest(BaseModel):
     symbol: str
     n_iter: Optional[int] = 20
-    cv: Optional[int] = 5
+    cv: Optional[int] = 3
     scoring: Optional[str] = 'roc_auc'
     test_size: Optional[float] = 0.2
 

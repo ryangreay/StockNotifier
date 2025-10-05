@@ -2,7 +2,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, TimeSeriesSplit
 from sklearn.metrics import classification_report
 import os
 from google.cloud import storage
@@ -371,10 +371,16 @@ class StockPredictor:
             X = prepare_features(df)
             y = df['target']
 
-            # Train/holdout split for unbiased final evaluation
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=test_size, random_state=42, shuffle=True, stratify=y
-            )
+            
+
+            # Chronological train/holdout split to avoid temporal leakage
+            num_samples = len(X)
+            test_count = max(1, int(num_samples * test_size))
+            split_index = num_samples - test_count
+            X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
+            y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
+
+            
 
             # Define model and parameter distributions
             base_model = self._create_new_model()
@@ -384,8 +390,8 @@ class StockPredictor:
                 'max_features': ['sqrt', 'log2', None]
             }
 
-            # Stratified K-Fold for classification
-            cv_splitter = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
+            # Time series cross-validation with gap to prevent lookahead leakage
+            cv_splitter = TimeSeriesSplit(n_splits=cv, gap=user_settings.prediction_window)
 
             # Randomized search
             search = RandomizedSearchCV(

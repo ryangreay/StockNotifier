@@ -351,7 +351,9 @@ def calculate_technical_indicators(df):
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
     macd_hist_mean = df['MACD_Hist'].rolling(window=60, min_periods=1).mean()
     macd_hist_std = df['MACD_Hist'].rolling(window=60, min_periods=1).std()
-    df['MACD_Hist_Z'] = (df['MACD_Hist'] - macd_hist_mean) / macd_hist_std
+    # Avoid division by zero for MACD_Hist_Z
+    safe_std = macd_hist_std.replace(0, np.nan)
+    df['MACD_Hist_Z'] = (df['MACD_Hist'] - macd_hist_mean) / safe_std
     
     # Bollinger Bands
     std = df['Close'].rolling(window=20).std()
@@ -359,8 +361,16 @@ def calculate_technical_indicators(df):
     df['Lower_Band'] = df['MA_20'] - (std * 2)
     # Bollinger %B indicator
     bb_width = (df['Upper_Band'] - df['Lower_Band'])
-    df['PercentB'] = (df['Close'] - df['Lower_Band']) / bb_width
+    # Avoid division by zero for PercentB
+    safe_bb_width = bb_width.replace(0, np.nan)
+    df['PercentB'] = (df['Close'] - df['Lower_Band']) / safe_bb_width
     
+    # Replace inf with NaN to be dropped later
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    df[num_cols] = df[num_cols].replace([np.inf, -np.inf], np.nan)
+
+    
+
     return df
 
 def create_target_variable(df, prediction_window: int, movement_threshold: float):
@@ -377,15 +387,30 @@ def fetch_data_with_retry(symbol, interval='1h', max_retries=3, initial_delay=5)
             # First check cache
             cached_data = get_cached_data(symbol, interval)
             if cached_data is not None:
-                print(f"Using cached data for {symbol}")
+                
                 return cached_data
             
             # Try Alpha Vantage first
             df = get_alpha_vantage_data(symbol, interval)
             
+            # If Alpha Vantage returns too little intraday data, force Yahoo fallback
+            if df is not None and interval in ['1h', '6h']:
+                min_rows_required = 1000 if interval == '1h' else 400
+                if len(df) < min_rows_required:
+                    
+                    max_days = get_timeframe_window(interval)
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=max_days)
+                    if attempt > 0:
+                        delay = initial_delay * (2 ** (attempt - 1))
+                        
+                        time.sleep(delay)
+                    stock = yf.Ticker(symbol)
+                    df = stock.history(start=start_date, end=end_date, interval=interval)
+            
             # Fall back to Yahoo Finance if Alpha Vantage fails or limit reached
             if df is None:
-                print(f"Falling back to Yahoo Finance for {symbol}")
+                
                 # Get the maximum window size for this interval
                 max_days = get_timeframe_window(interval)
                 end_date = datetime.now()
@@ -394,7 +419,7 @@ def fetch_data_with_retry(symbol, interval='1h', max_retries=3, initial_delay=5)
                 # Add delay with exponential backoff
                 if attempt > 0:
                     delay = initial_delay * (2 ** (attempt - 1))
-                    print(f"Attempt {attempt + 1}: Waiting {delay} seconds before retry...")
+                    
                     time.sleep(delay)
                 
                 stock = yf.Ticker(symbol)
@@ -405,7 +430,7 @@ def fetch_data_with_retry(symbol, interval='1h', max_retries=3, initial_delay=5)
                 cache_data(symbol, interval, df)
                 return df
             
-            print(f"Attempt {attempt + 1}: Empty data received for {symbol}, retrying...")
+            
         except Exception as e:
             print(f"Attempt {attempt + 1}: Error fetching data for {symbol}: {str(e)}")
             
@@ -430,8 +455,8 @@ def get_historical_data(symbol: str, timeframe: str = '1h', prediction_window: i
         df = calculate_technical_indicators(df)
         df = create_target_variable(df, prediction_window, movement_threshold)
         
-        # Drop rows with NaN values
-        df = df.dropna()
+        # Drop rows with NaN values (including ones from indicator guards)
+        df = df.replace([np.inf, -np.inf], np.nan).dropna()
         
         if df.empty:
             raise ValueError(f"No valid data points after processing for {symbol}")
@@ -460,8 +485,8 @@ def get_latest_data(symbol: str, timeframe: str = '1h', prediction_window: int =
         # Calculate technical indicators (we don't need target variable for prediction)
         df = calculate_technical_indicators(df)
         
-        # Drop rows with NaN values
-        df = df.dropna()
+        # Drop rows with NaN values (including ones from indicator guards)
+        df = df.replace([np.inf, -np.inf], np.nan).dropna()
         
         if df.empty:
             raise ValueError(f"No data available for {symbol}")
